@@ -122,7 +122,10 @@ class CommandsPlugin(BasePlugin):
             if mode:
                 cmd_executed = True
                 items = get_all_items(user_dir)
-                if not items: self.reply(msg, "📁 Папка пуста")
+                used = get_dir_size(user_dir)
+                footer = f"\n\n📊 Квота: {format_size(used)} / {format_size(QUOTA_LIMIT_BYTES)}"
+                if not items:
+                    self.reply(msg, "📁 Папка пуста" + footer)
                 else:
                     res = ["Список файлов:"]
                     for i, itm in enumerate(items):
@@ -141,11 +144,6 @@ class CommandsPlugin(BasePlugin):
                             size, mtime = format_size(st.st_size), datetime.datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M')
                             if itm.endswith('/'): res.append(f"{i+1} - {display_itm} (директория, {mtime})")
                             else: res.append(f"{i+1} - {display_itm} ({size}, загружен {mtime})")
-
-                    footer = ""
-                    if mode == 'size':
-                        used = get_dir_size(user_dir)
-                        footer = f"\n\n📊 Квота: {format_size(used)} / {format_size(QUOTA_LIMIT_BYTES)}"
 
                     self.reply(msg, "\n".join(res) + footer)
         elif cmd in ('link', 'lnk') and len(parts) == 2:
@@ -193,15 +191,52 @@ class CommandsPlugin(BasePlugin):
         elif cmd == 'priv' and len(parts) == 1:
             cmd_executed = True
             index_path = os.path.join(user_dir, 'index.html')
+            php_path = os.path.join(user_dir, 'index.php')
+            if os.path.exists(php_path):
+                try:
+                    os.remove(php_path)
+                except Exception:
+                    pass
             if not os.path.exists(index_path):
                 with open(index_path, 'w') as f: f.write("<html><body><h1>Private Archive</h1></body></html>")
-                self.reply(msg, "🔒 Архив теперь приватный (создан index.html)")
+                self.reply(msg, "🔒 Архив теперь приватный (создан index.html, index.php удалён)")
             else: self.reply(msg, "ℹ Архив уже приватный.")
         elif cmd == 'pub' and len(parts) == 1:
             cmd_executed = True
             index_path = os.path.join(user_dir, 'index.html')
-            if os.path.exists(index_path): os.remove(index_path); self.reply(msg, "🔓 Архив теперь публичный (удалён index.html)")
-            else: self.reply(msg, "ℹ Архив уже публичный.")
+            php_path = os.path.join(user_dir, 'index.php')
+            removed = []
+            if os.path.exists(index_path):
+                try:
+                    os.remove(index_path)
+                    removed.append("index.html")
+                except Exception:
+                    pass
+            if os.path.exists(php_path):
+                try:
+                    os.remove(php_path)
+                    removed.append("index.php")
+                except Exception:
+                    pass
+            if removed:
+                self.reply(msg, f"🔓 Архив теперь публичный (удалено: {', '.join(removed)})")
+            else:
+                self.reply(msg, "ℹ Архив уже публичный.")
+        elif cmd == 'album' and len(parts) == 1:
+            cmd_executed = True
+            template_path = 'index.php'
+            target_path = os.path.join(user_dir, 'index.php')
+            index_html = os.path.join(user_dir, 'index.html')
+            if os.path.exists(template_path):
+                try:
+                    shutil.copy(template_path, target_path)
+                    if os.path.exists(index_html):
+                        os.remove(index_html)
+                    self.reply(msg, "🖼 Режим альбома включён (index.php скопирован, index.html удалён)")
+                except Exception as e:
+                    self.reply(msg, f"❌ Ошибка при создании альбома: {e}")
+            else:
+                self.reply(msg, "❌ Ошибка: Шаблон index.php не найден в корне бота")
 
         # Admin commands
         if not cmd_executed and ADMIN_JID and msg['from'].bare.lower() == ADMIN_JID.lower():
