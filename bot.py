@@ -25,6 +25,7 @@ class OBBFastBot(ClientXMPP):
         self.db = Database()
         self.migrate_json_to_db()
         self.migrate_filenames()
+        self.cleanup_leftover_parts()
 
         # Initialize core features via plugins
         self.register_plugin('xep_0030')
@@ -56,7 +57,9 @@ class OBBFastBot(ClientXMPP):
 
     def handle_ping(self, iq):
         logging.info(f"PING RECV from {iq['from']}")
-        reply = iq.reply(); reply.append(ET.Element('{urn:xmpp:ping}ping')); reply.send()
+        reply = iq.reply()
+        reply.append(ET.Element('{urn:xmpp:ping}ping'))
+        reply.send()
         logging.info(f"PONG SENT to {iq['from']}")
 
     async def cleanup_pending_files(self):
@@ -67,17 +70,41 @@ class OBBFastBot(ClientXMPP):
                 to_delete = []
                 for sid, info in self.pending_files.items():
                     if isinstance(info, dict):
-                        if now - info.get('timestamp', now) > 600:
+                        # Timeout for inactive transfers (1 minute)
+                        if now - info.get('timestamp', now) > 60:
                             to_delete.append(sid)
+                            # Cancel associated task if exists
+                            task_key = f"task_{sid}"
+                            if task_key in self.pending_files:
+                                task = self.pending_files[task_key]
+                                if isinstance(task, asyncio.Task) and not task.done():
+                                    logging.info(f"CLEANUP: Cancelling inactive task {task_key}")
+                                    task.cancel()
                     elif isinstance(info, asyncio.Task):
                         if info.done():
                             to_delete.append(sid)
 
                 for sid in to_delete:
-                    logging.info(f"CLEANUP: Removing pending item sid={sid}")
-                    del self.pending_files[sid]
+                    if sid in self.pending_files:
+                        logging.info(f"CLEANUP: Removing pending item sid={sid}")
+                        del self.pending_files[sid]
             except Exception as e:
                 logging.error(f"CLEANUP ERROR: {e}")
+
+    def cleanup_leftover_parts(self):
+        logging.info("START: Cleanup leftover .part files")
+        count = 0
+        for root, dirs, files in os.walk(self.dest_dir):
+            for f in files:
+                if f.endswith('.part'):
+                    path = os.path.join(root, f)
+                    try:
+                        os.remove(path)
+                        count += 1
+                    except Exception as e:
+                        logging.error(f"CLEANUP PART ERROR for {path}: {e}")
+        if count > 0:
+            logging.info(f"FINISH: Removed {count} .part files during startup")
 
     def migrate_json_to_db(self):
         from config import WHITELIST_FILE
@@ -87,11 +114,14 @@ class OBBFastBot(ClientXMPP):
                     import json
                     with open(WHITELIST_FILE, 'r') as f:
                         data = json.load(f)
-                        for entry in data: self.db.add_to_whitelist(entry)
+                        for entry in data:
+                            self.db.add_to_whitelist(entry)
                     logging.info(f"MIGRATED {len(data)} entries from {WHITELIST_FILE} to database")
                     os.remove(WHITELIST_FILE)
-                elif os.path.isdir(WHITELIST_FILE): os.rmdir(WHITELIST_FILE)
-        except Exception as e: logging.error(f"MIGRATION ERROR: {e}")
+                elif os.path.isdir(WHITELIST_FILE):
+                    os.rmdir(WHITELIST_FILE)
+        except Exception as e:
+            logging.error(f"MIGRATION ERROR: {e}")
 
     def is_allowed(self, jid):
         bare_jid = jid.bare.lower()
@@ -110,9 +140,13 @@ class OBBFastBot(ClientXMPP):
                 if ' ' in f:
                     old_path = os.path.join(root, f)
                     new_path = os.path.join(root, f.replace(' ', '_'))
-                    try: os.rename(old_path, new_path); count += 1
-                    except Exception as e: logging.error(f"MIGRATE ERROR for {old_path}: {e}")
-        if count > 0: logging.info(f"FINISH: Renamed {count} files during migration")
+                    try:
+                        os.rename(old_path, new_path)
+                        count += 1
+                    except Exception as e:
+                        logging.error(f"MIGRATE ERROR for {old_path}: {e}")
+        if count > 0:
+            logging.info(f"FINISH: Renamed {count} files during migration")
 
     def get_user_info(self, jid):
         bare_jid = jid.bare.lower()
@@ -142,6 +176,7 @@ class OBBFastBot(ClientXMPP):
             "link <номер>[,<номер>],.. - получение ссылок на файлы или lnk * - для всех файлов.\n"
             "priv - сделать архив приватным (создать index.html).\n"
             "pub - сделать архив публичным (удалить index.html).\n"
+            "album - включить режим галереи (создать index.php).\n"
             "ping - проверить доступность бота.\n"
             "help или ? - список команд."
         )

@@ -84,8 +84,13 @@ class CommandsPlugin(BasePlugin):
                     else:
                         moved_count = 0
                         for src in resolved_srcs:
-                            if os.path.abspath(src) == os.path.abspath(dst): continue
+                            if os.path.abspath(src) == os.path.abspath(dst):
+                                continue
                             new_dst = os.path.join(dst, os.path.basename(src.rstrip('/')))
+                            from utils import is_php_file
+                            if is_php_file(new_dst):
+                                self.reply(msg, f"⚠️ Ошибка: Переименование в PHP-файлы запрещено ({os.path.basename(new_dst)})")
+                                continue
                             rel_dst = os.path.relpath(new_dst, user_dir)
                             is_dir = os.path.isdir(src)
                             limit = MAX_DIR_DEPTH if not is_dir else MAX_DIR_DEPTH - 1
@@ -100,15 +105,30 @@ class CommandsPlugin(BasePlugin):
                     if src and os.path.exists(src):
                         try:
                             final_dst = dst
-                            if os.path.isdir(dst): final_dst = os.path.join(dst, os.path.basename(src.rstrip('/')))
+                            if os.path.isdir(dst):
+                                final_dst = os.path.join(dst, os.path.basename(src.rstrip('/')))
+                            else:
+                                # Если это переименование файла, сохраняем исходное расширение
+                                if os.path.isfile(src):
+                                    _, original_ext = os.path.splitext(src)
+                                    # Просто добавляем расширение к тому, что ввел юзер
+                                    # Но если юзер ввел имя которое УЖЕ заканчивается на это расширение, не дублируем
+                                    if not final_dst.lower().endswith(original_ext.lower()):
+                                        final_dst += original_ext
+
                             rel_dst = os.path.relpath(final_dst, user_dir)
                             is_dir = os.path.isdir(src)
                             limit = MAX_DIR_DEPTH if not is_dir else MAX_DIR_DEPTH - 1
-                            if rel_dst != "." and rel_dst.count(os.sep) > limit: self.reply(msg, f"❌ Ошибка: Превышена максимальная глубина вложенности")
+                            if rel_dst != "." and rel_dst.count(os.sep) > limit:
+                                self.reply(msg, "❌ Ошибка: Превышена максимальная глубина вложенности")
                             else:
-                                final_dst = get_unique_path(final_dst)
-                                os.rename(src, final_dst)
-                                self.reply(msg, f"🚚 Перемещено: {os.path.relpath(src, user_dir)} -> {os.path.relpath(final_dst, user_dir)}")
+                                from utils import is_php_file
+                                if is_php_file(final_dst):
+                                    self.reply(msg, f"⚠️ Ошибка: Переименование в PHP-файлы запрещено ({os.path.basename(final_dst)})")
+                                else:
+                                    final_dst = get_unique_path(final_dst)
+                                    os.rename(src, final_dst)
+                                    self.reply(msg, f"🚚 Перемещено: {os.path.relpath(src, user_dir)} -> {os.path.relpath(final_dst, user_dir)}")
                         except Exception as e: self.reply(msg, f"❌ Ошибка: {e}")
                     else: self.reply(msg, "❌ Файл не найден")
         elif cmd in ('ls', 'lss', 'lsl') and len(parts) <= 2:
@@ -122,7 +142,11 @@ class CommandsPlugin(BasePlugin):
             if mode:
                 cmd_executed = True
                 items = get_all_items(user_dir)
-                if not items: self.reply(msg, "📁 Папка пуста")
+                used = get_dir_size(user_dir)
+                footer = f"\n\n📊 Квота: {format_size(used)} / {format_size(QUOTA_LIMIT_BYTES)}"
+                footer += f"\n📂 Ваш архив: {self.bot.base_url}/{user_hash}/"
+                if not items:
+                    self.reply(msg, "📁 Папка пуста" + footer)
                 else:
                     res = ["Список файлов:"]
                     for i, itm in enumerate(items):
@@ -139,13 +163,10 @@ class CommandsPlugin(BasePlugin):
                         elif mode == 'long':
                             st = os.stat(full_path)
                             size, mtime = format_size(st.st_size), datetime.datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M')
-                            if itm.endswith('/'): res.append(f"{i+1} - {display_itm} (директория, {mtime})")
-                            else: res.append(f"{i+1} - {display_itm} ({size}, загружен {mtime})")
-
-                    footer = ""
-                    if mode == 'size':
-                        used = get_dir_size(user_dir)
-                        footer = f"\n\n📊 Квота: {format_size(used)} / {format_size(QUOTA_LIMIT_BYTES)}"
+                            if itm.endswith('/'):
+                                res.append(f"{i+1} - {display_itm} [директория, {mtime}]")
+                            else:
+                                res.append(f"{i+1} - {display_itm} [{size}, загружен {mtime}]")
 
                     self.reply(msg, "\n".join(res) + footer)
         elif cmd in ('link', 'lnk') and len(parts) == 2:
@@ -193,15 +214,52 @@ class CommandsPlugin(BasePlugin):
         elif cmd == 'priv' and len(parts) == 1:
             cmd_executed = True
             index_path = os.path.join(user_dir, 'index.html')
+            php_path = os.path.join(user_dir, 'index.php')
+            if os.path.exists(php_path):
+                try:
+                    os.remove(php_path)
+                except Exception:
+                    pass
             if not os.path.exists(index_path):
                 with open(index_path, 'w') as f: f.write("<html><body><h1>Private Archive</h1></body></html>")
-                self.reply(msg, "🔒 Архив теперь приватный (создан index.html)")
+                self.reply(msg, "🔒 Архив теперь приватный (создан index.html, index.php удалён)")
             else: self.reply(msg, "ℹ Архив уже приватный.")
         elif cmd == 'pub' and len(parts) == 1:
             cmd_executed = True
             index_path = os.path.join(user_dir, 'index.html')
-            if os.path.exists(index_path): os.remove(index_path); self.reply(msg, "🔓 Архив теперь публичный (удалён index.html)")
-            else: self.reply(msg, "ℹ Архив уже публичный.")
+            php_path = os.path.join(user_dir, 'index.php')
+            removed = []
+            if os.path.exists(index_path):
+                try:
+                    os.remove(index_path)
+                    removed.append("index.html")
+                except Exception:
+                    pass
+            if os.path.exists(php_path):
+                try:
+                    os.remove(php_path)
+                    removed.append("index.php")
+                except Exception:
+                    pass
+            if removed:
+                self.reply(msg, f"🔓 Архив теперь публичный (удалено: {', '.join(removed)})")
+            else:
+                self.reply(msg, "ℹ Архив уже публичный.")
+        elif cmd == 'album' and len(parts) == 1:
+            cmd_executed = True
+            template_path = 'index.php'
+            target_path = os.path.join(user_dir, 'index.php')
+            index_html = os.path.join(user_dir, 'index.html')
+            if os.path.exists(template_path):
+                try:
+                    shutil.copy(template_path, target_path)
+                    if os.path.exists(index_html):
+                        os.remove(index_html)
+                    self.reply(msg, "🖼 Режим альбома включён (index.php скопирован, index.html удалён)")
+                except Exception as e:
+                    self.reply(msg, f"❌ Ошибка при создании альбома: {e}")
+            else:
+                self.reply(msg, "❌ Ошибка: Шаблон index.php не найден в корне бота")
 
         # Admin commands
         if not cmd_executed and ADMIN_JID and msg['from'].bare.lower() == ADMIN_JID.lower():

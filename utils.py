@@ -13,9 +13,19 @@ def format_size(size):
     return f"{size:.1f} ГБ".replace('.', ',')
 
 def get_dir_size(path):
-    """Подсчитывает суммарный размер всех файлов в папке (рекурсивно), исключая index.html"""
-    return sum(os.path.getsize(os.path.join(d, f))
-               for d, _, fs in os.walk(path) for f in fs if f != 'index.html')
+    """Подсчитывает суммарный размер всех файлов в папке (рекурсивно), исключая служебные файлы галереи"""
+    total_size = 0
+    gallery_files = {'index.html', 'index.php'}
+    gallery_dirs = {'_sfpg_data'}
+
+    for d, dirs, fs in os.walk(path):
+        # Исключаем папку с данными галереи
+        dirs[:] = [dir_name for dir_name in dirs if dir_name not in gallery_dirs]
+
+        for f in fs:
+            if f not in gallery_files:
+                total_size += os.path.getsize(os.path.join(d, f))
+    return total_size
 
 def safe_quote(text):
     """Красивое кодирование URL (сохраняем кириллицу для читаемости)"""
@@ -32,15 +42,18 @@ def get_safe_path(user_dir, path_str):
     return target_path
 
 def get_unique_path(path):
-    """Получаем уникальный путь для предотвращения перезаписи"""
-    if not os.path.exists(path):
+    """Получаем уникальный путь для предотвращения перезаписи, учитывая .part файлы"""
+    def is_taken(p):
+        return os.path.exists(p) or os.path.exists(p + ".part")
+
+    if not is_taken(path):
         return path
 
     base, ext = os.path.splitext(path)
     counter = 1
     while True:
         new_path = f"{base}_{counter}{ext}"
-        if not os.path.exists(new_path):
+        if not is_taken(new_path):
             return new_path
         counter += 1
 
@@ -76,10 +89,40 @@ def resolve_items_list(user_dir, arg, items):
             if path: resolved.append(path)
     return list(dict.fromkeys(resolved))
 
+def is_php_file(filename):
+    """Проверяет, является ли файл PHP-скриптом или опасным конфигом по его расширению"""
+    # Опасные расширения, связанные с PHP
+    forbidden_extensions = {
+        '.php', '.php3', '.php4', '.php5', '.php7', '.phtml',
+        '.pht', '.phar', '.phps'
+    }
+    # Опасные полные имена файлов (конфигурации)
+    forbidden_filenames = {'.htaccess', 'web.config'}
+
+    filename = filename.lower()
+    # Убираем потенциальные параметры запроса и фрагменты, если имя получено из URL
+    clean_name = filename.split('?')[0].split('#')[0].strip().rstrip('.')
+
+    if clean_name in forbidden_filenames:
+        return True
+
+    base_name = os.path.basename(clean_name)
+    if base_name in forbidden_filenames:
+        return True
+
+    _, ext = os.path.splitext(clean_name)
+    return ext in forbidden_extensions
+
 def get_all_items(user_dir):
-    """Получаем все элементы рекурсивно с ограничением вложенности"""
+    """Получаем все элементы рекурсивно с ограничением вложенности, скрывая системные файлы"""
     items = []
+    gallery_files = {'index.html', 'index.php'}
+    gallery_dirs = {'_sfpg_data'}
+
     for root, dirs, files in os.walk(user_dir):
+        # Исключаем папку с данными галереи из обхода
+        dirs[:] = [d for d in dirs if d not in gallery_dirs]
+
         rel_root = os.path.relpath(root, user_dir)
         if rel_root == ".":
             rel_root = ""
@@ -93,7 +136,7 @@ def get_all_items(user_dir):
             if path.count(os.sep) < MAX_DIR_DEPTH:
                 items.append(path + "/")
         for f in files:
-            if f == 'index.html':
+            if f in gallery_files or f.endswith('.part'):
                 continue
             path = os.path.join(rel_root, f)
             # Файлы могут находиться в директориях уровня MAX_DIR_DEPTH
