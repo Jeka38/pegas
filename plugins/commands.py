@@ -31,7 +31,6 @@ class CommandsPlugin(BasePlugin):
             if url is not None and url.text:
                 desc = oob.find('{jabber:x:oob}desc')
                 fname = desc.text if desc is not None and desc.text else os.path.basename(url.text)
-                import asyncio
                 asyncio.create_task(self.bot.file_transfer.download_from_url(url.text, fname, msg['from']))
                 return
 
