@@ -196,7 +196,7 @@ class FileTransferPlugin(BasePlugin):
                                     received += len(chunk)
                                 except asyncio.TimeoutError:
                                     logging.error(f"OOB TIMEOUT: {url}, no data for 60s")
-                                    self.bot.send_message(mto=peer_jid, mbody="⚠️ Ошибка: Превышено время ожидания данных (1 мин). Файл удалён, попробуйте отправить снова.", mtype='chat')
+                                    self.bot.send_message(mto=peer_jid, mbody="⚠️ Ошибка: Файл получен не полностью. Пожалуйста, попробуйте отправить снова.", mtype='chat')
                                     raise
                             await loop.run_in_executor(None, f.flush)
                             await loop.run_in_executor(None, os.fsync, f.fileno())
@@ -552,7 +552,7 @@ class FileTransferPlugin(BasePlugin):
                             self.bot.pending_files[sid]['timestamp'] = loop.time()
                     except asyncio.TimeoutError:
                         logging.error(f"DOWNLOAD TIMEOUT: sid={sid}, no data for 60s")
-                        self.bot.send_message(mto=peer_jid, mbody="⚠️ Ошибка: Превышено время ожидания данных (1 мин). Файл удалён, попробуйте отправить снова.", mtype='chat')
+                        self.bot.send_message(mto=peer_jid, mbody="⚠️ Ошибка: Файл получен не полностью. Пожалуйста, попробуйте отправить снова.", mtype='chat')
                         raise
                     except (asyncio.CancelledError, Exception):
                         raise
