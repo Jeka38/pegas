@@ -59,7 +59,7 @@ class FileTransferPlugin(BasePlugin):
             handler.Callback('S5B', matcher.MatchXPath('{jabber:client}iq/{http://jabber.org/protocol/bytestreams}query'), self.handle_raw_s5b)
         )
         self.bot.register_handler(
-            handler.Callback('Jingle', matcher.MatchXPath('iq/{urn:xmpp:jingle:1}jingle'), self.handle_jingle)
+            handler.Callback('Jingle', matcher.MatchXPath('{jabber:client}iq/{urn:xmpp:jingle:1}jingle'), self.handle_jingle)
         )
         self.bot.register_handler(
             handler.Callback('OOB', matcher.MatchXPath('{jabber:client}iq/{jabber:iq:oob}query'), self.handle_iq_oob)
@@ -123,14 +123,16 @@ class FileTransferPlugin(BasePlugin):
             # Find matching session
             file_info = None
             sid_match = None
+            # We look for the Jingle Session ID (sid) first, which always holds the full info.
+            # transport_sid entries in pending_files are just aliases.
             for sid, info in self.bot.pending_files.items():
                 if isinstance(info, dict) and info.get('dst_addr') == dst_addr:
                     file_info = info
-                    sid_match = sid
+                    sid_match = info.get('session_sid', sid)
                     break
 
             if file_info and not file_info.get('downloading'):
-                logging.info(f"SOCKS5 inbound: Match found for {dst_addr} (sid={sid_match})")
+                logging.info(f"SOCKS5 inbound: Match found for {dst_addr} (session_sid={sid_match})")
                 writer.write(b"\x05\x00\x00\x03" + bytes([len(dst_addr)]) + dst_addr.encode() + b"\x00\x00")
                 await writer.drain()
                 file_info['downloading'] = True
@@ -356,10 +358,12 @@ class FileTransferPlugin(BasePlugin):
                 ibb_t = content.find('{urn:xmpp:jingle:transports:ibb:1}transport')
                 if ibb_t is not None:
                     if sid in self.bot.pending_files:
-                        ibb_sid = ibb_t.get('sid')
-                        self.bot.pending_files[sid]['transport_sid'] = ibb_sid
-                        self.bot.pending_files[sid]['ibb_stanzas'] = ibb_t.get('stanzas')
-                        self.bot.pending_files[ibb_sid] = self.bot.pending_files[sid]
+                        file_info = self.bot.pending_files[sid]
+                        ibb_sid = ibb_t.get('sid') or sid
+                        file_info['transport_sid'] = ibb_sid
+                        file_info['ibb_stanzas'] = ibb_t.get('stanzas')
+                        self.bot.pending_files[ibb_sid] = file_info
+
                         reply = self.bot.make_iq_set(ito=iq['from'])
                         res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'transport-accept', 'sid': sid})
                         res_c = ET.SubElement(res_j, '{urn:xmpp:jingle:1}content', {
@@ -370,14 +374,13 @@ class FileTransferPlugin(BasePlugin):
                         if use_msg: ibb_attrs['stanzas'] = 'message'
                         ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ibb:1}transport', ibb_attrs)
 
-                        # Pre-initialize IBB stream for Slixmpp
                         from slixmpp.plugins.xep_0047 import IBBytestream
                         stream = IBBytestream(self.bot, ibb_sid, 8192, self.bot.boundjid, iq['from'], use_msg)
                         asyncio.create_task(self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, ibb_sid, iq['from'], stream))
                         self.bot.event('ibb_stream_start', stream)
 
-                        reply.append(res_j)
-                        reply.send()
+                        reply.append(res_j); reply.send()
+                        return # Jingle result sent as transport-accept
             iq.reply().send()
         elif action == 'transport-accept':
             iq.reply().send()
@@ -397,10 +400,10 @@ class FileTransferPlugin(BasePlugin):
     def _handle_jingle_session_initiate(self, iq, jingle):
         sid = jingle.get('sid')
         if not self.bot.is_allowed(iq['from']):
-            return iq.reply().set_type('error').set_error_condition('not-allowed').send()
+            reply = iq.reply(); reply['type'] = 'error'; reply['error']['condition'] = 'not-allowed'; return reply.send()
 
         content = jingle.find('{urn:xmpp:jingle:1}content')
-        if content is None: return iq.reply().set_type('error').set_error_condition('bad-request').send()
+        if content is None: reply = iq.reply(); reply['type'] = 'error'; reply['error']['condition'] = 'bad-request'; return reply.send()
 
         # Support versioned FT namespaces
         ft_ns = None
@@ -411,33 +414,33 @@ class FileTransferPlugin(BasePlugin):
 
         if ft_ns is None:
             logging.warning(f"JINGLE: Unsupported application in session-initiate from {iq['from']}")
-            return iq.reply().set_type('error').set_error_condition('feature-not-implemented').send()
+            reply = iq.reply(); reply['type'] = 'error'; reply['error']['condition'] = 'feature-not-implemented'; return reply.send()
 
         description = content.find(f'{{{ft_ns}}}description')
         file_tag = description.find(f'{{{ft_ns}}}file')
-        if file_tag is None: return iq.reply().set_type('error').set_error_condition('bad-request').send()
+        if file_tag is None: reply = iq.reply(); reply['type'] = 'error'; reply['error']['condition'] = 'bad-request'; return reply.send()
 
         name_tag = file_tag.find(f'{{{ft_ns}}}name')
         size_tag = file_tag.find(f'{{{ft_ns}}}size')
-        if name_tag is None or not name_tag.text: return iq.reply().set_type('error').set_error_condition('bad-request').send()
+        if name_tag is None or not name_tag.text: reply = iq.reply(); reply['type'] = 'error'; reply['error']['condition'] = 'bad-request'; return reply.send()
 
         fname = os.path.basename(name_tag.text).replace(' ', '_')
         from utils import is_php_file
         if is_php_file(fname):
             self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Ошибка: Загрузка PHP-файлов запрещена ({fname})", mtype='chat')
-            return iq.reply().set_type('error').set_error_condition('not-acceptable').send()
+            reply = iq.reply(); reply['type'] = 'error'; reply['error']['condition'] = 'not-acceptable'; return reply.send()
 
         try: fsize = int(size_tag.text) if size_tag is not None else 0
         except: fsize = 0
 
         user_dir, _ = self.bot.get_user_info(iq['from'])
         if get_dir_size(user_dir) + fsize > QUOTA_LIMIT_BYTES:
-            return iq.reply().set_type('error').set_error_condition('not-acceptable').send()
+            reply = iq.reply(); reply['type'] = 'error'; reply['error']['condition'] = 'not-acceptable'; return reply.send()
 
         ibb_t = content.find('{urn:xmpp:jingle:transports:ibb:1}transport')
         s5b_t = content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
         if ibb_t is None and s5b_t is None:
-            return iq.reply().set_type('error').set_error_condition('feature-not-implemented').send()
+            reply = iq.reply(); reply['type'] = 'error'; reply['error']['condition'] = 'feature-not-implemented'; return reply.send()
 
         transport_sid = s5b_t.get('sid') if s5b_t is not None and s5b_t.get('sid') else (ibb_t.get('sid') if ibb_t is not None and ibb_t.get('sid') else sid)
         initiator = jingle.get('initiator') or iq['from'].full
@@ -455,7 +458,8 @@ class FileTransferPlugin(BasePlugin):
             'ft_ns': ft_ns, 'transport_sid': transport_sid, 's5b_connecting': False,
             'ibb_stanzas': ibb_t.get('stanzas') if ibb_t is not None else None,
             'dst_addr': dst_addr, 'initiator': initiator,
-            'hash_algo': hash_algo, 'hash_value': hash_value
+            'hash_algo': hash_algo, 'hash_value': hash_value,
+            'session_sid': sid
         }
         if transport_sid != sid: self.bot.pending_files[transport_sid] = self.bot.pending_files[sid]
 
@@ -695,16 +699,18 @@ class FileTransferPlugin(BasePlugin):
         except Exception as e: logging.error(f"SOCKS5 ERROR: {e}")
 
     def handle_ibb_stream(self, stream):
-        sid = stream.sid
-        file_info = self.bot.pending_files.get(sid)
+        t_sid = stream.sid
+        file_info = self.bot.pending_files.get(t_sid)
         if file_info:
             if file_info['peer_jid'].bare != stream.peer_jid.bare:
                 stream.close()
                 return
-            logging.info(f"IBB stream started for sid={sid}, peer={stream.peer_jid}")
-            self.bot.pending_files[sid]['stream'] = stream
-            task = asyncio.create_task(self.download_file_task(stream, file_info, stream.peer_jid, sid))
-            self.bot.pending_files[f"task_{sid}"] = task
+            # Use session SID for tracking and signaling
+            s_sid = file_info.get('session_sid', t_sid)
+            logging.info(f"IBB stream started for session={s_sid} (transport={t_sid}), peer={stream.peer_jid}")
+            file_info['stream'] = stream
+            task = asyncio.create_task(self.download_file_task(stream, file_info, stream.peer_jid, s_sid))
+            self.bot.pending_files[f"task_{s_sid}"] = task
         else:
             stream.close()
 
@@ -757,7 +763,8 @@ class FileTransferPlugin(BasePlugin):
                         j_term = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-terminate', 'sid': sid})
                         reason = ET.SubElement(j_term, '{urn:xmpp:jingle:1}reason')
                         ET.SubElement(reason, '{urn:xmpp:jingle:1}success')
-                        ET.SubElement(j_term, f'{{{file_info["ft_ns"]}}}success')
+                        # Place <success/> element in file-transfer namespace inside <reason/>
+                        ET.SubElement(reason, f'{{{file_info["ft_ns"]}}}success')
                         term_iq.append(j_term); term_iq.send()
                     except Exception as e: logging.error(f"JINGLE signaling error: {e}")
             else:

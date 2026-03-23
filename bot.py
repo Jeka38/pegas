@@ -34,18 +34,15 @@ class OBBFastBot(ClientXMPP):
         self['xep_0047'].block_size = 8192
         self['xep_0047'].max_block_size = 65536
 
-        # Jingle plugins
-        self.register_plugin('xep_0166') # Jingle
-        self.register_plugin('xep_0260') # Jingle SOCKS5 Bytestreams
-        self.register_plugin('xep_0261') # Jingle In-Band Bytestreams
-
-        # Explicitly advertise Jingle File Transfer support
+        # Explicitly advertise Jingle File Transfer support (manual implementation)
         self['xep_0030'].add_feature('urn:xmpp:jingle:1')
         self['xep_0030'].add_feature('urn:xmpp:jingle:apps:file-transfer:1')
         self['xep_0030'].add_feature('urn:xmpp:jingle:apps:file-transfer:2')
         self['xep_0030'].add_feature('urn:xmpp:jingle:apps:file-transfer:3')
         self['xep_0030'].add_feature('urn:xmpp:jingle:apps:file-transfer:4')
         self['xep_0030'].add_feature('urn:xmpp:jingle:apps:file-transfer:5')
+        self['xep_0030'].add_feature('urn:xmpp:jingle:transports:s5b:1')
+        self['xep_0030'].add_feature('urn:xmpp:jingle:transports:ibb:1')
 
         self.register_plugin('xep_0199')
         self['xep_0199'].send_keepalive = True
