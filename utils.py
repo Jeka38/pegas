@@ -79,6 +79,30 @@ def resolve_items_list(user_dir, arg, items):
             if path: resolved.append(path)
     return list(dict.fromkeys(resolved))
 
+def is_php_file(filename):
+    """Проверяет, является ли файл PHP-скриптом или опасным конфигом по его расширению"""
+    # Опасные расширения, связанные с PHP
+    forbidden_extensions = {
+        '.php', '.php3', '.php4', '.php5', '.php7', '.phtml',
+        '.pht', '.phar', '.phps'
+    }
+    # Опасные полные имена файлов (конфигурации)
+    forbidden_filenames = {'.htaccess', 'web.config'}
+
+    filename = filename.lower()
+    # Убираем потенциальные параметры запроса и фрагменты, если имя получено из URL
+    clean_name = filename.split('?')[0].split('#')[0].strip().rstrip('.')
+
+    if clean_name in forbidden_filenames:
+        return True
+
+    base_name = os.path.basename(clean_name)
+    if base_name in forbidden_filenames:
+        return True
+
+    _, ext = os.path.splitext(clean_name)
+    return ext in forbidden_extensions
+
 def get_all_items(user_dir):
     """Получаем все элементы рекурсивно с ограничением вложенности"""
     items = []

@@ -172,6 +172,10 @@ class FileTransferPlugin(BasePlugin):
 
     async def download_from_url(self, url, fname, peer_jid):
         logging.info(f"Downloading OOB from {url}")
+        from utils import is_php_file
+        if is_php_file(fname):
+            self.bot.send_message(mto=peer_jid, mbody=f"⚠️ Ошибка: Загрузка PHP-файлов запрещена ({fname})", mtype='chat')
+            return
         user_dir, user_hash = self.bot.get_user_info(peer_jid)
         fname = os.path.basename(fname).replace(' ', '_')
         path = get_unique_path(os.path.join(user_dir, fname))
@@ -240,6 +244,14 @@ class FileTransferPlugin(BasePlugin):
             name_tag, size_tag = file_tag.find(f'{{{ft_ns}}}name'), file_tag.find(f'{{{ft_ns}}}size')
             if name_tag is None or size_tag is None: return
             fname, transport_sid = os.path.basename(name_tag.text).replace(' ', '_'), sid
+            from utils import is_php_file
+            if is_php_file(fname):
+                self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Ошибка: Загрузка PHP-файлов запрещена ({fname})", mtype='chat')
+                reply = iq.reply()
+                reply['type'] = 'error'
+                reply['error']['condition'] = 'not-acceptable'
+                reply.send()
+                return
             try: fsize = int(size_tag.text)
             except: fsize = 0
             user_dir, _ = self.bot.get_user_info(iq['from'])
@@ -367,6 +379,14 @@ class FileTransferPlugin(BasePlugin):
             sid, tag = si.get('id'), si.find('{http://jabber.org/protocol/si/profile/file-transfer}file')
             logging.info(f"SI REQUEST: sid={sid}, from={iq['from']}, file={tag.get('name')}, size={tag.get('size')}")
             fname, fsize = os.path.basename(tag.get('name')).replace(' ', '_'), int(tag.get('size', 0))
+            from utils import is_php_file
+            if is_php_file(fname):
+                self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Ошибка: Загрузка PHP-файлов запрещена ({fname})", mtype='chat')
+                reply = iq.reply()
+                reply['type'] = 'error'
+                reply['error']['condition'] = 'not-acceptable'
+                reply.send()
+                return
             user_dir, _ = self.bot.get_user_info(iq['from'])
             if get_dir_size(user_dir) + fsize > QUOTA_LIMIT_BYTES:
                 reply = iq.reply()

@@ -84,8 +84,13 @@ class CommandsPlugin(BasePlugin):
                     else:
                         moved_count = 0
                         for src in resolved_srcs:
-                            if os.path.abspath(src) == os.path.abspath(dst): continue
+                            if os.path.abspath(src) == os.path.abspath(dst):
+                                continue
                             new_dst = os.path.join(dst, os.path.basename(src.rstrip('/')))
+                            from utils import is_php_file
+                            if is_php_file(new_dst):
+                                self.reply(msg, f"⚠️ Ошибка: Переименование в PHP-файлы запрещено ({os.path.basename(new_dst)})")
+                                continue
                             rel_dst = os.path.relpath(new_dst, user_dir)
                             is_dir = os.path.isdir(src)
                             limit = MAX_DIR_DEPTH if not is_dir else MAX_DIR_DEPTH - 1
@@ -104,11 +109,16 @@ class CommandsPlugin(BasePlugin):
                             rel_dst = os.path.relpath(final_dst, user_dir)
                             is_dir = os.path.isdir(src)
                             limit = MAX_DIR_DEPTH if not is_dir else MAX_DIR_DEPTH - 1
-                            if rel_dst != "." and rel_dst.count(os.sep) > limit: self.reply(msg, f"❌ Ошибка: Превышена максимальная глубина вложенности")
+                            if rel_dst != "." and rel_dst.count(os.sep) > limit:
+                                self.reply(msg, "❌ Ошибка: Превышена максимальная глубина вложенности")
                             else:
-                                final_dst = get_unique_path(final_dst)
-                                os.rename(src, final_dst)
-                                self.reply(msg, f"🚚 Перемещено: {os.path.relpath(src, user_dir)} -> {os.path.relpath(final_dst, user_dir)}")
+                                from utils import is_php_file
+                                if is_php_file(final_dst):
+                                    self.reply(msg, f"⚠️ Ошибка: Переименование в PHP-файлы запрещено ({os.path.basename(final_dst)})")
+                                else:
+                                    final_dst = get_unique_path(final_dst)
+                                    os.rename(src, final_dst)
+                                    self.reply(msg, f"🚚 Перемещено: {os.path.relpath(src, user_dir)} -> {os.path.relpath(final_dst, user_dir)}")
                         except Exception as e: self.reply(msg, f"❌ Ошибка: {e}")
                     else: self.reply(msg, "❌ Файл не найден")
         elif cmd in ('ls', 'lss', 'lsl') and len(parts) <= 2:
