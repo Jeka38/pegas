@@ -1,5 +1,7 @@
 import os
+import re
 import shutil
+import asyncio
 import datetime
 from config import ADMIN_JID, QUOTA_LIMIT_BYTES, MAX_DIR_DEPTH
 from utils import (
@@ -17,6 +19,11 @@ class CommandsPlugin(BasePlugin):
         if msg['type'] not in ('chat', 'normal'):
             return
 
+        if not self.bot.is_allowed(msg['from']):
+            if msg['body']:
+                self.reply(msg, f"⚠️ Доступ запрещён. Пожалуйста, обратитесь к администратору для получения доступа: {ADMIN_JID}")
+            return
+
         # Handle XEP-0066 Out-of-Band Data in messages
         oob = msg.xml.find('{jabber:x:oob}x')
         if oob is not None:
@@ -30,15 +37,26 @@ class CommandsPlugin(BasePlugin):
 
         if not msg['body']:
             return
-        if not self.bot.is_allowed(msg['from']):
-            self.reply(msg, f"⚠️ Доступ запрещён. Пожалуйста, обратитесь к администратору для получения доступа: {ADMIN_JID}")
-            return
 
         parts = msg['body'].strip().split()
         if not parts: return
         cmd = parts[0].lower()
         user_dir, user_hash = self.bot.get_user_info(msg['from'])
         cmd_executed = False
+
+        # Arbitrary URL detection
+        urls = re.findall(r'(https?://(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?::\d+)?(?:/[^\s<>"]*)?)', msg['body'])
+        if urls:
+            for url in urls[:5]:  # Limit to 5 URLs per message
+                asyncio.create_task(self.bot.file_transfer.download_from_url(url, os.path.basename(url), msg['from']))
+
+            # If the message contains only URLs, we consider it handled
+            body_without_urls = msg['body']
+            for url in urls:
+                body_without_urls = body_without_urls.replace(url, '').strip()
+
+            if not body_without_urls:
+                cmd_executed = True
 
         # User commands
         if cmd in ('help', '?') and len(parts) == 1:

@@ -5,6 +5,8 @@ import hashlib
 import asyncio
 import logging
 import aiohttp
+import ipaddress
+import urllib.parse
 import base64  # ДОБАВЛЕНО ДЛЯ РАСПАКОВКИ IBB MESSAGE
 from slixmpp.xmlstream import ET, matcher, handler
 from config import ADMIN_JID, ADMIN_NOTIFY_LEVEL, QUOTA_LIMIT_BYTES
@@ -37,6 +39,7 @@ class FileTransferPlugin(BasePlugin):
         'urn:xmpp:jingle:apps:file-transfer:5',
         'urn:xmpp:jingle:transports:s5b:1',
         'urn:xmpp:jingle:transports:ibb:1',
+        'urn:xmpp:jingle:transports:oob:1',
         'http://jabber.org/protocol/si',
         'http://jabber.org/protocol/si/profile/file-transfer',
         'http://jabber.org/protocol/bytestreams',
@@ -53,16 +56,16 @@ class FileTransferPlugin(BasePlugin):
         self.bot.add_event_handler("xml_in", self.handle_xml_in)
         self.bot.add_event_handler("xml_out", self.handle_xml_out)
         self.bot.register_handler(
-            handler.Callback('SI', matcher.MatchXPath('{jabber:client}iq/{http://jabber.org/protocol/si}si'), self.handle_raw_si)
+            handler.Callback('SI', matcher.MatchXPath('iq/{http://jabber.org/protocol/si}si'), self.handle_raw_si)
         )
         self.bot.register_handler(
-            handler.Callback('S5B', matcher.MatchXPath('{jabber:client}iq/{http://jabber.org/protocol/bytestreams}query'), self.handle_raw_s5b)
+            handler.Callback('S5B', matcher.MatchXPath('iq/{http://jabber.org/protocol/bytestreams}query'), self.handle_raw_s5b)
         )
         self.bot.register_handler(
-            handler.Callback('Jingle', matcher.MatchXPath('{jabber:client}iq/{urn:xmpp:jingle:1}jingle'), self.handle_jingle)
+            handler.Callback('Jingle', matcher.MatchXPath('iq/{urn:xmpp:jingle:1}jingle'), self.handle_jingle)
         )
         self.bot.register_handler(
-            handler.Callback('OOB', matcher.MatchXPath('{jabber:client}iq/{jabber:iq:oob}query'), self.handle_iq_oob)
+            handler.Callback('OOB', matcher.MatchXPath('iq/{jabber:iq:oob}query'), self.handle_iq_oob)
         )
         self.bot.add_event_handler("ibb_stream_start", self.handle_ibb_stream)
         
@@ -170,14 +173,41 @@ class FileTransferPlugin(BasePlugin):
         self.bot.pending_files[f"oob_{url}"] = asyncio.create_task(self.download_from_url(url, fname, iq['from']))
         iq.reply().send()
 
-    async def download_from_url(self, url, fname, peer_jid):
+    async def download_from_url(self, url, fname, peer_jid, jingle_sid=None):
         logging.info(f"Downloading OOB from {url}")
+
+        # SSRF Protection: Validate host
+        try:
+            parsed_url = urllib.parse.urlparse(url)
+            if not parsed_url.hostname:
+                raise ValueError("Invalid URL hostname")
+
+            loop = asyncio.get_running_loop()
+            host_ips = await loop.getaddrinfo(parsed_url.hostname, parsed_url.port or 80)
+            for _, _, _, _, sockaddr in host_ips:
+                ip = ipaddress.ip_address(sockaddr[0])
+                if ip.is_private or ip.is_loopback or ip.is_link_local:
+                    self.bot.send_message(mto=peer_jid, mbody=f"⚠️ Ошибка: Доступ к внутренним ресурсам запрещён ({parsed_url.hostname})", mtype='chat')
+                    return
+        except Exception as e:
+            logging.error(f"SSRF Check failed for {url}: {e}")
+            self.bot.send_message(mto=peer_jid, mbody=f"⚠️ Ошибка: Некорректный адрес ({url})", mtype='chat')
+            return
+
+        # Improve filename extraction
+        if not fname or fname == os.path.basename(url):
+            parsed_url = urllib.parse.urlparse(url)
+            fname = os.path.basename(parsed_url.path)
+            if not fname:
+                fname = "downloaded_file"
+
         from utils import is_php_file
         if is_php_file(fname):
             self.bot.send_message(mto=peer_jid, mbody=f"⚠️ Ошибка: Загрузка PHP-файлов запрещена ({fname})", mtype='chat')
             return
+
         user_dir, user_hash = self.bot.get_user_info(peer_jid)
-        fname = os.path.basename(fname).replace(' ', '_')
+        fname = fname.replace(' ', '_')
         path = get_unique_path(os.path.join(user_dir, fname))
         part_path = path + ".part"
         loop = asyncio.get_event_loop()
@@ -186,6 +216,12 @@ class FileTransferPlugin(BasePlugin):
                 async with session.get(url, timeout=300) as resp:
                     if resp.status == 200:
                         fsize = int(resp.headers.get('Content-Length', 0))
+                        # Limit arbitrary URL download to 500MB
+                        MAX_OOB_SIZE = 500 * 1024 * 1024
+                        if fsize > MAX_OOB_SIZE:
+                            self.bot.send_message(mto=peer_jid, mbody="⚠️ Ошибка: Файл слишком велик (макс. 500 МБ)", mtype='chat')
+                            return
+
                         if fsize > 0 and get_dir_size(user_dir) + fsize > QUOTA_LIMIT_BYTES:
                              self.bot.send_message(mto=peer_jid, mbody="⚠ Квота превышена!", mtype='chat')
                              return
@@ -215,6 +251,20 @@ class FileTransferPlugin(BasePlugin):
                         os.rename(part_path, path)
                         real_fname = os.path.basename(path)
                         self.bot.send_message(mto=peer_jid, mbody=f"✅ Готово!\n{self.bot.base_url}/{user_hash}/{safe_quote(real_fname)}", mtype='chat')
+                        if jingle_sid:
+                            # Send received info and success terminate for Jingle
+                            ft_ns = self.bot.pending_files[jingle_sid]['ft_ns']
+                            info_iq = self.bot.make_iq_set(ito=peer_jid)
+                            res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-info', 'sid': jingle_sid})
+                            ET.SubElement(res_j, f'{{{ft_ns}}}received', {'xmlns': ft_ns})
+                            info_iq.append(res_j); info_iq.send()
+
+                            term_iq = self.bot.make_iq_set(ito=peer_jid)
+                            res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-terminate', 'sid': jingle_sid})
+                            reason = ET.SubElement(res_j, 'reason')
+                            ET.SubElement(reason, 'success')
+                            term_iq.append(res_j); term_iq.send()
+                            if jingle_sid in self.bot.pending_files: del self.bot.pending_files[jingle_sid]
                     else: logging.error(f"OOB download failed: HTTP {resp.status}")
         except Exception as e:
             logging.error(f"OOB download error: {e}")
@@ -260,7 +310,7 @@ class FileTransferPlugin(BasePlugin):
                 reply['type'] = 'error'
                 reply.send()
                 return
-            ibb_t, s5b_t = content.find('{urn:xmpp:jingle:transports:ibb:1}transport'), content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
+            ibb_t, s5b_t, oob_t = content.find('{urn:xmpp:jingle:transports:ibb:1}transport'), content.find('{urn:xmpp:jingle:transports:s5b:1}transport'), content.find('{urn:xmpp:jingle:transports:oob:1}transport')
             if s5b_t is not None and s5b_t.get('sid'): transport_sid = s5b_t.get('sid')
             elif ibb_t is not None and ibb_t.get('sid'): transport_sid = ibb_t.get('sid')
             else: transport_sid = sid
@@ -269,7 +319,9 @@ class FileTransferPlugin(BasePlugin):
                 'peer_jid': iq['from'], 'ibb_allowed': True,
                 'content_name': content.get('name'), 'content_creator': content.get('creator'),
                 'ft_ns': ft_ns, 'transport_sid': transport_sid, 's5b_connecting': False,
-                'ibb_stanzas': ibb_t.get('stanzas') if ibb_t is not None else None
+                'ibb_stanzas': ibb_t.get('stanzas') if ibb_t is not None else None,
+                'jingle_oob': oob_t is not None,
+                'sid': sid
             }
             if transport_sid != sid: self.bot.pending_files[transport_sid] = self.bot.pending_files[sid]
             iq.reply().send()
@@ -293,6 +345,15 @@ class FileTransferPlugin(BasePlugin):
                     # Proxy candidates
                     for p_host, p_jid in [('proxy.eu.jabber.network', 'proxy.eu.jabber.network'), ('proxy.jabber.ru', 'proxy.jabber.ru')]:
                         ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=p_host, port='1080', jid=p_jid, cid=hashlib.md5(p_jid.encode()).hexdigest(), priority='65536', type='proxy')
+                elif oob_t is not None:
+                    url_tag = oob_t.find('{jabber:iq:oob}url')
+                    if url_tag is not None and url_tag.text:
+                        ET.SubElement(res_c, '{urn:xmpp:jingle:transports:oob:1}transport')
+                        accept_iq.append(res_j)
+                        accept_iq.send()
+                        # Start OOB download
+                        asyncio.create_task(self.download_from_url(url_tag.text, fname, iq['from'], jingle_sid=sid))
+                        return
                 elif ibb_t is not None:
                     b_size = int(ibb_t.get('block-size', '8192'))
                     use_msg = ibb_t.get('stanzas') == 'message'
@@ -583,6 +644,26 @@ class FileTransferPlugin(BasePlugin):
                 os.rename(part_path, path)
                 logging.info(f"DOWNLOAD COMPLETE: sid={sid}, path={path}")
                 self.bot.send_message(mto=peer_jid, mbody=f"✅ Готово!\n{self.bot.base_url}/{user_hash}/{safe_quote(os.path.basename(path))}", mtype='chat')
+
+                # Check if it was a Jingle transfer and send signaling if so
+                # We identify Jingle by presence of 'ft_ns' in file_info
+                if 'ft_ns' in file_info:
+                    j_sid = file_info.get('sid', sid)
+                    # But in our implementation we usually use the same dict for both.
+                    ft_ns = file_info['ft_ns']
+
+                    # session-info: received
+                    info_iq = self.bot.make_iq_set(ito=peer_jid)
+                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-info', 'sid': j_sid})
+                    ET.SubElement(res_j, f'{{{ft_ns}}}received', {'xmlns': ft_ns})
+                    info_iq.append(res_j); info_iq.send()
+
+                    # session-terminate: success
+                    term_iq = self.bot.make_iq_set(ito=peer_jid)
+                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-terminate', 'sid': j_sid})
+                    reason = ET.SubElement(res_j, 'reason')
+                    ET.SubElement(reason, 'success')
+                    term_iq.append(res_j); term_iq.send()
             else:
                 logging.error(f"DOWNLOAD INCOMPLETE: sid={sid}, received {received}/{file_info['size']}")
                 self.bot.send_message(mto=peer_jid, mbody="⚠️ Ошибка: Файл получен не полностью. Пожалуйста, попробуйте отправить снова.", mtype='chat')
