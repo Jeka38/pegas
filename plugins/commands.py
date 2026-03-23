@@ -144,6 +144,7 @@ class CommandsPlugin(BasePlugin):
                 items = get_all_items(user_dir)
                 used = get_dir_size(user_dir)
                 footer = f"\n\n📊 Квота: {format_size(used)} / {format_size(QUOTA_LIMIT_BYTES)}"
+                footer += f"\n📂 Ваш архив: {self.bot.base_url}/{user_hash}/"
                 if not items:
                     self.reply(msg, "📁 Папка пуста" + footer)
                 else:
