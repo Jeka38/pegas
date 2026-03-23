@@ -7,7 +7,7 @@ import logging
 import aiohttp
 import base64  # ДОБАВЛЕНО ДЛЯ РАСПАКОВКИ IBB MESSAGE
 from slixmpp.xmlstream import ET, matcher, handler
-from config import ADMIN_JID, ADMIN_NOTIFY_LEVEL, QUOTA_LIMIT_BYTES
+from config import ADMIN_JID, ADMIN_NOTIFY_LEVEL, QUOTA_LIMIT_BYTES, SOCKS5_PORT, SOCKS5_IP
 from utils import get_dir_size, safe_quote, get_unique_path
 from .base import BasePlugin
 
@@ -68,6 +68,79 @@ class FileTransferPlugin(BasePlugin):
         
         # ДОБАВЛЕНО: Регистрируем перехватчик входящего XML для IBB <message>
         self.bot.add_filter('in', self._intercept_ibb_messages)
+
+        # Start SOCKS5 server for S5B
+        asyncio.create_task(self._start_socks5_server())
+
+    async def _start_socks5_server(self):
+        try:
+            self._socks5_server = await asyncio.start_server(
+                self._handle_socks5_inbound, '0.0.0.0', SOCKS5_PORT
+            )
+            logging.info(f"SOCKS5 server started on port {SOCKS5_PORT}")
+            async with self._socks5_server:
+                await self._socks5_server.serve_forever()
+        except Exception as e:
+            logging.error(f"Failed to start SOCKS5 server: {e}")
+
+    async def _handle_socks5_inbound(self, reader, writer):
+        try:
+            # 1. Handshake
+            data = await asyncio.wait_for(reader.readexactly(2), timeout=5)
+            if data[0] != 0x05:
+                writer.close(); return
+            nmethods = data[1]
+            methods = await asyncio.wait_for(reader.readexactly(nmethods), timeout=5)
+            if 0x00 not in methods:  # We only support NO AUTH
+                writer.write(b"\x05\xFF"); await writer.drain()
+                writer.close(); return
+            writer.write(b"\x05\x00"); await writer.drain()
+
+            # 2. Request
+            req = await asyncio.wait_for(reader.readexactly(4), timeout=5)
+            if req[1] != 0x01:  # Only CONNECT
+                writer.write(b"\x05\x07"); await writer.drain()
+                writer.close(); return
+
+            atyp = req[3]
+            if atyp == 0x03:  # DOMAINNAME
+                addr_len_data = await asyncio.wait_for(reader.readexactly(1), timeout=5)
+                addr_len = addr_len_data[0]
+                dst_addr_data = await asyncio.wait_for(reader.readexactly(addr_len), timeout=5)
+                dst_addr = dst_addr_data.decode()
+            elif atyp == 0x01:  # IPv4
+                ipv4_data = await asyncio.wait_for(reader.readexactly(4), timeout=5)
+                dst_addr = ".".join(map(str, ipv4_data))
+            else:
+                writer.write(b"\x05\x08"); await writer.drain()
+                writer.close(); return
+
+            await asyncio.wait_for(reader.readexactly(2), timeout=5)  # Port (ignored)
+
+            # Find matching session
+            file_info = None
+            sid_match = None
+            for sid, info in self.bot.pending_files.items():
+                if isinstance(info, dict) and info.get('dst_addr') == dst_addr:
+                    file_info = info
+                    sid_match = sid
+                    break
+
+            if file_info and not file_info.get('downloading'):
+                logging.info(f"SOCKS5 inbound: Match found for {dst_addr} (sid={sid_match})")
+                writer.write(b"\x05\x00\x00\x03" + bytes([len(dst_addr)]) + dst_addr.encode() + b"\x00\x00")
+                await writer.drain()
+                file_info['downloading'] = True
+                await self.download_file_task(reader, file_info, file_info['peer_jid'], sid_match)
+            else:
+                logging.warning(f"SOCKS5 inbound: No match or already downloading for {dst_addr}")
+                writer.write(b"\x05\x04"); await writer.drain()
+
+            writer.close()
+            await writer.wait_closed()
+        except Exception as e:
+            logging.error(f"SOCKS5 inbound error: {e}")
+            writer.close()
 
     # ДОБАВЛЕНО: Сам метод перехвата, убивающий проблему <not-acceptable>
     def _intercept_ibb_messages(self, stanza):
@@ -264,12 +337,17 @@ class FileTransferPlugin(BasePlugin):
             if s5b_t is not None and s5b_t.get('sid'): transport_sid = s5b_t.get('sid')
             elif ibb_t is not None and ibb_t.get('sid'): transport_sid = ibb_t.get('sid')
             else: transport_sid = sid
+
+            initiator = jingle.get('initiator') or iq['from'].full
+            dst_addr = hashlib.sha1(f"{transport_sid}{initiator}{self.bot.boundjid.full}".encode()).hexdigest()
+
             self.bot.pending_files[sid] = {
                 'name': fname, 'size': fsize, 'timestamp': asyncio.get_event_loop().time(),
                 'peer_jid': iq['from'], 'ibb_allowed': True,
                 'content_name': content.get('name'), 'content_creator': content.get('creator'),
                 'ft_ns': ft_ns, 'transport_sid': transport_sid, 's5b_connecting': False,
-                'ibb_stanzas': ibb_t.get('stanzas') if ibb_t is not None else None
+                'ibb_stanzas': ibb_t.get('stanzas') if ibb_t is not None else None,
+                'dst_addr': dst_addr, 'initiator': initiator
             }
             if transport_sid != sid: self.bot.pending_files[transport_sid] = self.bot.pending_files[sid]
             iq.reply().send()
@@ -284,10 +362,10 @@ class FileTransferPlugin(BasePlugin):
                 if s5b_t is not None:
                     res_t = ET.SubElement(res_c, '{urn:xmpp:jingle:transports:s5b:1}transport', {'sid': transport_sid, 'mode': 'tcp'})
 
-                    # Direct candidate
-                    local_ip = self.get_local_ip()
+                    # Direct candidate (our own SOCKS5 server)
+                    s5_ip = SOCKS5_IP or self.get_local_ip()
                     ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate',
-                                  host=local_ip, port='1080', jid=self.bot.boundjid.full,
+                                  host=s5_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full,
                                   cid='direct-host', priority='8253074', type='host')
 
                     # Proxy candidates
@@ -323,9 +401,24 @@ class FileTransferPlugin(BasePlugin):
             content = jingle.find('{urn:xmpp:jingle:1}content')
             if content is not None:
                 transport = content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
-                if transport is not None and not self.bot.pending_files.get(sid, {}).get('s5b_connecting'):
-                    self.bot.pending_files[sid]['s5b_connecting'] = True
-                    self.bot.pending_files[f"jingle_s5b_info_{sid}"] = asyncio.create_task(self._socks5_connect_and_save(iq, jingle_sid=sid))
+                if transport is not None:
+                    # Case 1: peer selected a candidate
+                    used = transport.find('{urn:xmpp:jingle:transports:s5b:1}candidate-used')
+                    if used is not None:
+                        cid = used.get('cid')
+                        logging.info(f"JINGLE transport-info: peer used candidate cid={cid} for sid={sid}")
+                        if cid == 'direct-host':
+                            logging.info(f"JINGLE: peer is connecting to our local SOCKS5 server.")
+                        else:
+                            # If it's a proxy, we might need to activate it (XEP-0260)
+                            # But usually, the initiator activates it after candidate-used is exchanged.
+                            # We are the responder here.
+                            pass
+
+                    # Case 2: peer provided new candidates
+                    elif transport.findall('{urn:xmpp:jingle:transports:s5b:1}candidate') and not self.bot.pending_files.get(sid, {}).get('s5b_connecting'):
+                        self.bot.pending_files[sid]['s5b_connecting'] = True
+                        self.bot.pending_files[f"jingle_s5b_info_{sid}"] = asyncio.create_task(self._socks5_connect_and_save(iq, jingle_sid=sid))
             iq.reply().send()
         elif action == 'transport-replace':
             content = jingle.find('{urn:xmpp:jingle:1}content')
@@ -405,10 +498,14 @@ class FileTransferPlugin(BasePlugin):
             chosen_method = next((m for m in ['jabber:iq:oob', 'http://jabber.org/protocol/bytestreams', 'http://jabber.org/protocol/ibb'] if m in offered_methods), None)
             if not chosen_method:
                 reply = iq.reply(); reply['type'] = 'error'; return reply.send()
+
+            dst_addr = hashlib.sha1(f"{sid}{iq['from'].full}{self.bot.boundjid.full}".encode()).hexdigest()
+
             self.bot.pending_files[sid] = {
                 'name': fname, 'size': fsize, 'timestamp': asyncio.get_event_loop().time(),
                 'ibb_allowed': 'http://jabber.org/protocol/ibb' in offered_methods,
-                'peer_jid': iq['from'], 'transport_sid': sid
+                'peer_jid': iq['from'], 'transport_sid': sid,
+                'dst_addr': dst_addr, 'initiator': iq['from'].full
             }
             reply = iq.reply()
             res_si = ET.Element('{http://jabber.org/protocol/si}si', {'id': sid})
@@ -438,11 +535,10 @@ class FileTransferPlugin(BasePlugin):
                 query = content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
                 if query is None: return
                 hosts = query.findall('{urn:xmpp:jingle:transports:s5b:1}candidate')
-                peer_full = iq['from'].full
             else:
                 query = iq.xml.find('{http://jabber.org/protocol/bytestreams}query')
                 if query is None: return
-                sid, peer_full = query.get('sid'), iq['from'].full
+                sid = query.get('sid')
                 used = query.find('{http://jabber.org/protocol/bytestreams}streamhost-used')
                 if used is not None:
                     jid = used.get('jid'); proxy = self.KNOWN_PROXIES.get(jid)
@@ -453,6 +549,11 @@ class FileTransferPlugin(BasePlugin):
                 if not hosts and used is None:
                     reply = iq.reply()
                     res_q = ET.Element('{http://jabber.org/protocol/bytestreams}query', {'sid': sid})
+
+                    # Direct candidate (our own SOCKS5 server)
+                    s5_ip = SOCKS5_IP or self.get_local_ip()
+                    ET.SubElement(res_q, 'streamhost', host=s5_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full)
+
                     for p_jid, p_info in self.KNOWN_PROXIES.items():
                         ET.SubElement(res_q, 'streamhost', host=p_info['host'], port=str(p_info['port']), jid=p_jid)
                     reply.append(res_q)
@@ -460,8 +561,7 @@ class FileTransferPlugin(BasePlugin):
                     return
             file_info = self.bot.pending_files.get(sid)
             if not file_info: return
-            t_sid = file_info.get('transport_sid', sid)
-            dst_addr = hashlib.sha1(f"{t_sid}{peer_full}{self.bot.boundjid.full}".encode()).hexdigest()
+            dst_addr = file_info.get('dst_addr')
 
             if jingle_sid and not hosts:
                 jingle = iq.xml.find('{urn:xmpp:jingle:1}jingle')
@@ -470,18 +570,27 @@ class FileTransferPlugin(BasePlugin):
                     return
 
             for host in hosts:
+                if file_info.get('downloading'):
+                    logging.info(f"S5B: Skipping host {host.get('host')} because download already started for sid={sid}")
+                    return
+
                 try:
                     logging.info(f"S5B: Connecting to {host.get('host')}:{host.get('port', 1080)} for sid={sid}")
                     reader, writer = await asyncio.wait_for(asyncio.open_connection(host.get('host'), int(host.get('port', 1080))), 5)
                     writer.write(b"\x05\x01\x00"); await writer.drain()
-                    if await reader.read(2) != b"\x05\x00": writer.close(); continue
+                    if await reader.readexactly(2) != b"\x05\x00": writer.close(); continue
                     writer.write(b"\x05\x01\x00\x03" + bytes([len(dst_addr)]) + dst_addr.encode() + b"\x00\x00"); await writer.drain()
-                    resp = await reader.read(4)
-                    if not resp or resp[1] != 0x00: writer.close(); continue
+                    resp = await reader.readexactly(4)
+                    if resp[1] != 0x00: writer.close(); continue
                     atyp = resp[3]
-                    if atyp == 0x01: await reader.read(6)
-                    elif atyp == 0x03: addr_len = await reader.read(1); await reader.read(addr_len[0] + 2)
-                    elif atyp == 0x04: await reader.read(18)
+                    if atyp == 0x01: await reader.readexactly(6)
+                    elif atyp == 0x03: addr_len_data = await reader.readexactly(1); await reader.readexactly(addr_len_data[0] + 2)
+                    elif atyp == 0x04: await reader.readexactly(18)
+
+                    if file_info.get('downloading'):
+                        logging.info(f"S5B: Download already started, closing redundant connection for sid={sid}")
+                        writer.close(); return
+
                     if jingle_sid:
                         reply = self.bot.make_iq_set(ito=iq['from'])
                         res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'transport-info', 'sid': jingle_sid})
@@ -496,7 +605,9 @@ class FileTransferPlugin(BasePlugin):
                             ET.SubElement(res_q, 'streamhost-used', jid=host.get('jid'))
                             reply.append(res_q)
                         reply.send()
+
                     logging.info(f"S5B: SUCCESS connect to {host.get('host')}:{host.get('port')} for sid={sid}")
+                    file_info['downloading'] = True
                     await self.download_file_task(reader, file_info, iq['from'], sid)
                     writer.close()
                     await writer.wait_closed()

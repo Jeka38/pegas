@@ -26,6 +26,10 @@ XMPP_PASSWORD = os.getenv('XMPP_PASSWORD')
 XMPP_HOST = os.getenv('XMPP_HOST', 'jabberworld.info')
 XMPP_PORT = int(os.getenv('XMPP_PORT', 5222))
 
+# SOCKS5 Proxy settings for S5B
+SOCKS5_PORT = int(os.getenv('SOCKS5_PORT', 1080))
+SOCKS5_IP = os.getenv('SOCKS5_IP')  # Public IP or domain for S5B candidates
+
 # Bot appearance and metadata
 APP_NAME = os.getenv('APP_NAME', 'OBBFastBot')
 VERSION = os.getenv('APP_VERSION', '1.1')
