@@ -163,8 +163,10 @@ class CommandsPlugin(BasePlugin):
                         elif mode == 'long':
                             st = os.stat(full_path)
                             size, mtime = format_size(st.st_size), datetime.datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M')
-                            if itm.endswith('/'): res.append(f"{i+1} - {display_itm} (директория, {mtime})")
-                            else: res.append(f"{i+1} - {display_itm} ({size}, загружен {mtime})")
+                            if itm.endswith('/'):
+                                res.append(f"{i+1} - {display_itm} [директория, {mtime}]")
+                            else:
+                                res.append(f"{i+1} - {display_itm} [{size}, загружен {mtime}]")
 
                     self.reply(msg, "\n".join(res) + footer)
         elif cmd in ('link', 'lnk') and len(parts) == 2:
