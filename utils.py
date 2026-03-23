@@ -13,9 +13,19 @@ def format_size(size):
     return f"{size:.1f} ГБ".replace('.', ',')
 
 def get_dir_size(path):
-    """Подсчитывает суммарный размер всех файлов в папке (рекурсивно), исключая index.html"""
-    return sum(os.path.getsize(os.path.join(d, f))
-               for d, _, fs in os.walk(path) for f in fs if f != 'index.html')
+    """Подсчитывает суммарный размер всех файлов в папке (рекурсивно), исключая служебные файлы галереи"""
+    total_size = 0
+    gallery_files = {'index.html', 'index.php'}
+    gallery_dirs = {'_sfpg_data'}
+
+    for d, dirs, fs in os.walk(path):
+        # Исключаем папку с данными галереи
+        dirs[:] = [dir_name for dir_name in dirs if dir_name not in gallery_dirs]
+
+        for f in fs:
+            if f not in gallery_files:
+                total_size += os.path.getsize(os.path.join(d, f))
+    return total_size
 
 def safe_quote(text):
     """Красивое кодирование URL (сохраняем кириллицу для читаемости)"""
@@ -104,9 +114,15 @@ def is_php_file(filename):
     return ext in forbidden_extensions
 
 def get_all_items(user_dir):
-    """Получаем все элементы рекурсивно с ограничением вложенности"""
+    """Получаем все элементы рекурсивно с ограничением вложенности, скрывая системные файлы"""
     items = []
+    gallery_files = {'index.html', 'index.php'}
+    gallery_dirs = {'_sfpg_data'}
+
     for root, dirs, files in os.walk(user_dir):
+        # Исключаем папку с данными галереи из обхода
+        dirs[:] = [d for d in dirs if d not in gallery_dirs]
+
         rel_root = os.path.relpath(root, user_dir)
         if rel_root == ".":
             rel_root = ""
@@ -120,7 +136,7 @@ def get_all_items(user_dir):
             if path.count(os.sep) < MAX_DIR_DEPTH:
                 items.append(path + "/")
         for f in files:
-            if f == 'index.html' or f.endswith('.part'):
+            if f in gallery_files or f.endswith('.part'):
                 continue
             path = os.path.join(rel_root, f)
             # Файлы могут находиться в директориях уровня MAX_DIR_DEPTH
