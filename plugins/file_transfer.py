@@ -68,6 +68,9 @@ class FileTransferPlugin(BasePlugin):
         
         # ДОБАВЛЕНО: Регистрируем перехватчик входящего XML для IBB <message>
         self.bot.add_filter('in', self._intercept_ibb_messages)
+        self.bot.register_handler(
+            handler.Callback('BoB', matcher.MatchXPath('{jabber:client}iq/{urn:xmpp:bob}data'), self.handle_bob_data)
+        )
 
         # Start SOCKS5 server for S5B
         asyncio.create_task(self._start_socks5_server())
@@ -218,6 +221,29 @@ class FileTransferPlugin(BasePlugin):
                 stanza_id = xml.get('id')
                 if stanza_id: self._tracked_ft_ids.discard(stanza_id)
 
+    def handle_bob_data(self, iq):
+        # Result IQ from BoB request
+        if iq['type'] in ('error', 'result'): return
+        iq.reply().send() # Technically BoB GET doesn't need reply if it was a result, but we handle stanzas generally.
+
+    async def _request_bob_thumbnail(self, peer_jid, cid, sid, save_dir):
+        logging.info(f"BOB: Requesting thumbnail {cid} from {peer_jid}")
+        iq = self.bot.make_iq_get(ito=peer_jid)
+        ET.SubElement(iq.xml, '{urn:xmpp:bob}data', cid=cid)
+        try:
+            res = await iq.send(timeout=10)
+            bob_data = res.xml.find('{urn:xmpp:bob}data')
+            if bob_data is not None and bob_data.text:
+                raw_data = base64.b64decode(bob_data.text)
+                if not raw_data: return
+                thumb_path = os.path.join(save_dir, f"thumb_{sid}.png")
+                loop = asyncio.get_event_loop()
+                with open(thumb_path, 'wb') as f:
+                    await loop.run_in_executor(None, f.write, raw_data)
+                logging.info(f"BOB: Thumbnail saved to {thumb_path}")
+        except Exception as e:
+            logging.error(f"BOB: Failed to get thumbnail {cid}: {e}")
+
     def handle_xml_out(self, xml):
         if self._should_log_xml(xml):
             logging.info(f"SENT FT XML to {xml.get('to', 'unknown')}:\n{self._to_log_str(xml)}")
@@ -350,6 +376,16 @@ class FileTransferPlugin(BasePlugin):
                 'dst_addr': dst_addr, 'initiator': initiator
             }
             if transport_sid != sid: self.bot.pending_files[transport_sid] = self.bot.pending_files[sid]
+
+            # Request Thumbnail via BoB if present
+            thumb_tag = file_tag.find(f'{{{ft_ns}}}thumbnail')
+            if thumb_tag is not None:
+                for attr in ['cid', 'url']: # Slixmpp or others might use url for BoB cid
+                    cid = thumb_tag.get(attr)
+                    if cid and cid.startswith('cid:'):
+                        asyncio.create_task(self._request_bob_thumbnail(iq['from'], cid, sid, user_dir))
+                        break
+
             iq.reply().send()
             try:
                 accept_iq = self.bot.make_iq_set(ito=iq['from'])
@@ -694,6 +730,24 @@ class FileTransferPlugin(BasePlugin):
                 os.rename(part_path, path)
                 logging.info(f"DOWNLOAD COMPLETE: sid={sid}, path={path}")
                 self.bot.send_message(mto=peer_jid, mbody=f"✅ Готово!\n{self.bot.base_url}/{user_hash}/{safe_quote(os.path.basename(path))}", mtype='chat')
+
+                # JINGLE Completion Signaling
+                if 'ft_ns' in file_info:
+                    try:
+                        # 1. session-info with <received/>
+                        info_iq = self.bot.make_iq_set(ito=peer_jid)
+                        j_info = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-info', 'sid': sid})
+                        ET.SubElement(j_info, f'{{{file_info["ft_ns"]}}}received')
+                        info_iq.append(j_info); info_iq.send()
+
+                        # 2. session-terminate with <success/>
+                        term_iq = self.bot.make_iq_set(ito=peer_jid)
+                        j_term = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-terminate', 'sid': sid})
+                        reason = ET.SubElement(j_term, '{urn:xmpp:jingle:1}reason')
+                        ET.SubElement(reason, '{urn:xmpp:jingle:1}success')
+                        ET.SubElement(j_term, f'{{{file_info["ft_ns"]}}}success')
+                        term_iq.append(j_term); term_iq.send()
+                    except Exception as e: logging.error(f"JINGLE signaling error: {e}")
             else:
                 logging.error(f"DOWNLOAD INCOMPLETE: sid={sid}, received {received}/{file_info['size']}")
                 self.bot.send_message(mto=peer_jid, mbody="⚠️ Ошибка: Файл получен не полностью. Пожалуйста, попробуйте отправить снова.", mtype='chat')
