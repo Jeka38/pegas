@@ -74,16 +74,23 @@ class FileTransferPlugin(BasePlugin):
         try:
             if hasattr(stanza, 'xml') and stanza.xml.tag.endswith('message'):
                 data_el = stanza.xml.find('{http://jabber.org/protocol/ibb}data')
+                close_el = stanza.xml.find('{http://jabber.org/protocol/ibb}close')
                 if data_el is not None:
                     sid = data_el.get('sid')
                     file_info = self.bot.pending_files.get(sid)
-                    # Если есть стрим, кидаем данные напрямую в него
                     if file_info and 'stream' in file_info:
+                        file_info['timestamp'] = asyncio.get_event_loop().time()
                         if data_el.text:
                             chunk = base64.b64decode(data_el.text)
                             file_info['stream'].recv_queue.put_nowait(chunk)
-                        # Возвращаем None! Это удаляет станзу, Slixmpp не отправит ошибку
-                        return None 
+                        return None
+                elif close_el is not None:
+                    sid = close_el.get('sid')
+                    file_info = self.bot.pending_files.get(sid)
+                    if file_info and 'stream' in file_info:
+                        file_info['timestamp'] = asyncio.get_event_loop().time()
+                        file_info['stream'].recv_queue.put_nowait(None)
+                        return None
         except Exception as e:
             logging.error(f"IBB filter error: {e}")
         return stanza
@@ -168,6 +175,7 @@ class FileTransferPlugin(BasePlugin):
         user_dir, user_hash = self.bot.get_user_info(peer_jid)
         fname = os.path.basename(fname).replace(' ', '_')
         path = get_unique_path(os.path.join(user_dir, fname))
+        part_path = path + ".part"
         loop = asyncio.get_event_loop()
         try:
             async with aiohttp.ClientSession() as session:
@@ -175,26 +183,33 @@ class FileTransferPlugin(BasePlugin):
                     if resp.status == 200:
                         fsize = int(resp.headers.get('Content-Length', 0))
                         if fsize > 0 and get_dir_size(user_dir) + fsize > QUOTA_LIMIT_BYTES:
-                             self.bot.send_message(mto=peer_jid, mbody="⚠ Квота превышена!", mtype='chat'); return
-                        with open(path, 'wb') as f:
+                             self.bot.send_message(mto=peer_jid, mbody="⚠ Квота превышена!", mtype='chat')
+                             return
+                        with open(part_path, 'wb') as f:
                             async for chunk in resp.content.iter_chunked(1048576):
                                 await loop.run_in_executor(None, f.write, chunk)
-                            await loop.run_in_executor(None, f.flush); await loop.run_in_executor(None, os.fsync, f.fileno())
+                            await loop.run_in_executor(None, f.flush)
+                            await loop.run_in_executor(None, os.fsync, f.fileno())
+                        os.rename(part_path, path)
                         real_fname = os.path.basename(path)
                         self.bot.send_message(mto=peer_jid, mbody=f"✅ Готово!\n{self.bot.base_url}/{user_hash}/{safe_quote(real_fname)}", mtype='chat')
                     else: logging.error(f"OOB download failed: HTTP {resp.status}")
         except Exception as e:
             logging.error(f"OOB download error: {e}")
-            if os.path.exists(path): os.remove(path)
+            if os.path.exists(part_path): os.remove(part_path)
 
     def handle_jingle(self, iq):
         jingle = iq.xml.find('{urn:xmpp:jingle:1}jingle')
-        if jingle is None: return
+        if jingle is None:
+            return
         action, sid = jingle.get('action'), jingle.get('sid')
         logging.info(f"JINGLE EVENT: action={action}, sid={sid}, from={iq['from']}")
         if action == 'session-initiate':
             if not self.bot.is_allowed(iq['from']):
-                reply = iq.reply(); reply['type'] = 'error'; reply.send(); return
+                reply = iq.reply()
+                reply['type'] = 'error'
+                reply.send()
+                return
             content = jingle.find('{urn:xmpp:jingle:1}content')
             if content is None: return
             ft_ns = 'urn:xmpp:jingle:apps:file-transfer:5'
@@ -211,7 +226,10 @@ class FileTransferPlugin(BasePlugin):
             except: fsize = 0
             user_dir, _ = self.bot.get_user_info(iq['from'])
             if get_dir_size(user_dir) + fsize > QUOTA_LIMIT_BYTES:
-                reply = iq.reply(); reply['type'] = 'error'; reply.send(); return
+                reply = iq.reply()
+                reply['type'] = 'error'
+                reply.send()
+                return
             ibb_t, s5b_t = content.find('{urn:xmpp:jingle:transports:ibb:1}transport'), content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
             if s5b_t is not None and s5b_t.get('sid'): transport_sid = s5b_t.get('sid')
             elif ibb_t is not None and ibb_t.get('sid'): transport_sid = ibb_t.get('sid')
@@ -265,7 +283,8 @@ class FileTransferPlugin(BasePlugin):
                     asyncio.create_task(self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, sid, iq['from'], stream))
                     self.bot.event('ibb_stream_start', stream)
 
-                accept_iq.append(res_j); accept_iq.send()
+                accept_iq.append(res_j)
+                accept_iq.send()
                 if s5b_t is not None and s5b_t.findall('{urn:xmpp:jingle:transports:s5b:1}candidate'):
                     self.bot.pending_files[sid]['s5b_connecting'] = True
                     self.bot.pending_files[f"jingle_s5b_{sid}"] = asyncio.create_task(self._socks5_connect_and_save(iq, jingle_sid=sid))
@@ -304,7 +323,8 @@ class FileTransferPlugin(BasePlugin):
                         asyncio.create_task(self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, ibb_sid, iq['from'], stream))
                         self.bot.event('ibb_stream_start', stream)
 
-                        reply.append(res_j); reply.send()
+                        reply.append(res_j)
+                        reply.send()
             iq.reply().send()
         elif action == 'transport-accept':
             iq.reply().send()
@@ -314,12 +334,16 @@ class FileTransferPlugin(BasePlugin):
                 task = self.bot.pending_files[task_key]
                 if isinstance(task, asyncio.Task) and not task.done():
                     task.cancel()
-            if sid in self.bot.pending_files: del self.bot.pending_files[sid]
+            if sid in self.bot.pending_files:
+                del self.bot.pending_files[sid]
             iq.reply().send()
 
     def handle_raw_si(self, iq):
         if not self.bot.is_allowed(iq['from']):
-            reply = iq.reply(); reply['type'] = 'error'; return reply.send()
+            reply = iq.reply()
+            reply['type'] = 'error'
+            reply.send()
+            return
         try:
             si = iq.xml.find('{http://jabber.org/protocol/si}si')
             sid, tag = si.get('id'), si.find('{http://jabber.org/protocol/si/profile/file-transfer}file')
@@ -327,7 +351,10 @@ class FileTransferPlugin(BasePlugin):
             fname, fsize = os.path.basename(tag.get('name')).replace(' ', '_'), int(tag.get('size', 0))
             user_dir, _ = self.bot.get_user_info(iq['from'])
             if get_dir_size(user_dir) + fsize > QUOTA_LIMIT_BYTES:
-                reply = iq.reply(); reply['type'] = 'error'; return reply.send()
+                reply = iq.reply()
+                reply['type'] = 'error'
+                reply.send()
+                return
             feature_neg = si.find('{http://jabber.org/protocol/feature-neg}feature')
             offered_methods = []
             if feature_neg is not None:
@@ -351,7 +378,8 @@ class FileTransferPlugin(BasePlugin):
             x = ET.SubElement(feature, '{jabber:x:data}x', type='submit')
             field = ET.SubElement(x, '{jabber:x:data}field', var='stream-method')
             ET.SubElement(field, '{jabber:x:data}value').text = chosen_method
-            reply.append(res_si); reply.send()
+            reply.append(res_si)
+            reply.send()
         except Exception as e: logging.error(f"SI ERROR: {e}")
 
     def handle_raw_s5b(self, iq):
@@ -385,10 +413,13 @@ class FileTransferPlugin(BasePlugin):
                 else:
                     hosts = query.findall('{http://jabber.org/protocol/bytestreams}streamhost')
                 if not hosts and used is None:
-                    reply = iq.reply(); res_q = ET.Element('{http://jabber.org/protocol/bytestreams}query', {'sid': sid})
+                    reply = iq.reply()
+                    res_q = ET.Element('{http://jabber.org/protocol/bytestreams}query', {'sid': sid})
                     for p_jid, p_info in self.KNOWN_PROXIES.items():
                         ET.SubElement(res_q, 'streamhost', host=p_info['host'], port=str(p_info['port']), jid=p_jid)
-                    reply.append(res_q); reply.send(); return
+                    reply.append(res_q)
+                    reply.send()
+                    return
             file_info = self.bot.pending_files.get(sid)
             if not file_info: return
             t_sid = file_info.get('transport_sid', sid)
@@ -428,7 +459,10 @@ class FileTransferPlugin(BasePlugin):
                             reply.append(res_q)
                         reply.send()
                     logging.info(f"S5B: SUCCESS connect to {host.get('host')}:{host.get('port')} for sid={sid}")
-                    await self.download_file_task(reader, file_info, iq['from'], sid); writer.close(); await writer.wait_closed(); return
+                    await self.download_file_task(reader, file_info, iq['from'], sid)
+                    writer.close()
+                    await writer.wait_closed()
+                    return
                 except Exception as e:
                     logging.info(f"S5B: Failed connect to {host.get('host')} for sid={sid}: {e}")
                     continue
@@ -456,7 +490,8 @@ class FileTransferPlugin(BasePlugin):
                 stream = IBBytestream(self.bot, new_ibb_sid, 8192, self.bot.boundjid, iq['from'], use_msg)
                 asyncio.create_task(self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, new_ibb_sid, iq['from'], stream))
                 self.bot.event('ibb_stream_start', stream)
-                reply.append(res_j); reply.send()
+                reply.append(res_j)
+                reply.send()
 
             if not file_info.get('ibb_allowed'):
                 if sid in self.bot.pending_files: del self.bot.pending_files[sid]
@@ -467,39 +502,54 @@ class FileTransferPlugin(BasePlugin):
         file_info = self.bot.pending_files.get(sid)
         if file_info:
             if file_info['peer_jid'].bare != stream.peer_jid.bare:
-                stream.close(); return
+                stream.close()
+                return
             logging.info(f"IBB stream started for sid={sid}, peer={stream.peer_jid}")
             self.bot.pending_files[sid]['stream'] = stream
-            self.bot.pending_files[f"task_{sid}"] = asyncio.create_task(self.download_file_task(stream, file_info, stream.peer_jid, sid))
-        else: stream.close()
+            task = asyncio.create_task(self.download_file_task(stream, file_info, stream.peer_jid, sid))
+            self.bot.pending_files[f"task_{sid}"] = task
+        else:
+            stream.close()
 
     async def download_file_task(self, reader, file_info, peer_jid, sid):
         logging.info(f"DOWNLOAD START: sid={sid}, peer={peer_jid}, file={file_info['name']}, size={file_info['size']}")
         user_dir, user_hash = self.bot.get_user_info(peer_jid)
         path = get_unique_path(os.path.join(user_dir, os.path.basename(file_info['name'])))
+        part_path = path + ".part"
         received, loop = 0, asyncio.get_event_loop()
         try:
-            with open(path, 'wb') as f:
+            with open(part_path, 'wb') as f:
                 while received < file_info['size']:
                     try:
                         if hasattr(reader, 'recv_queue'): chunk = await reader.recv_queue.get()
                         else: chunk = await reader.read(min(file_info['size'] - received, 1048576))
-                        if not chunk: break
-                        await loop.run_in_executor(None, f.write, chunk); received += len(chunk)
+                        if not chunk:
+                            break
+                        await loop.run_in_executor(None, f.write, chunk)
+                        received += len(chunk)
+                        if sid in self.bot.pending_files:
+                            self.bot.pending_files[sid]['timestamp'] = loop.time()
                     except (asyncio.CancelledError, Exception):
                         raise
-                await loop.run_in_executor(None, f.flush); await loop.run_in_executor(None, os.fsync, f.fileno())
+                await loop.run_in_executor(None, f.flush)
+                await loop.run_in_executor(None, os.fsync, f.fileno())
 
             if received == file_info['size']:
+                os.rename(part_path, path)
                 logging.info(f"DOWNLOAD COMPLETE: sid={sid}, path={path}")
                 self.bot.send_message(mto=peer_jid, mbody=f"✅ Готово!\n{self.bot.base_url}/{user_hash}/{safe_quote(os.path.basename(path))}", mtype='chat')
             else:
                 logging.error(f"DOWNLOAD INCOMPLETE: sid={sid}, received {received}/{file_info['size']}")
-                if os.path.exists(path): os.remove(path)
+                if os.path.exists(part_path): os.remove(part_path)
         except (asyncio.CancelledError, Exception) as e:
             logging.error(f"DOWNLOAD {'CANCELLED' if isinstance(e, asyncio.CancelledError) else 'ERROR'}: sid={sid}, error={e}")
-            if os.path.exists(path): os.remove(path)
+            if os.path.exists(part_path): os.remove(part_path)
         finally:
+            if hasattr(reader, 'close'):
+                try:
+                    if asyncio.iscoroutinefunction(reader.close): await reader.close()
+                    else: reader.close()
+                except: pass
             info = self.bot.pending_files.get(sid)
             if info:
                 t_sid = info.get('transport_sid')

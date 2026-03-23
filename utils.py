@@ -32,15 +32,18 @@ def get_safe_path(user_dir, path_str):
     return target_path
 
 def get_unique_path(path):
-    """Получаем уникальный путь для предотвращения перезаписи"""
-    if not os.path.exists(path):
+    """Получаем уникальный путь для предотвращения перезаписи, учитывая .part файлы"""
+    def is_taken(p):
+        return os.path.exists(p) or os.path.exists(p + ".part")
+
+    if not is_taken(path):
         return path
 
     base, ext = os.path.splitext(path)
     counter = 1
     while True:
         new_path = f"{base}_{counter}{ext}"
-        if not os.path.exists(new_path):
+        if not is_taken(new_path):
             return new_path
         counter += 1
 
@@ -93,7 +96,7 @@ def get_all_items(user_dir):
             if path.count(os.sep) < MAX_DIR_DEPTH:
                 items.append(path + "/")
         for f in files:
-            if f == 'index.html':
+            if f == 'index.html' or f.endswith('.part'):
                 continue
             path = os.path.join(rel_root, f)
             # Файлы могут находиться в директориях уровня MAX_DIR_DEPTH
