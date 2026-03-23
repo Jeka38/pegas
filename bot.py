@@ -70,8 +70,8 @@ class OBBFastBot(ClientXMPP):
                 to_delete = []
                 for sid, info in self.pending_files.items():
                     if isinstance(info, dict):
-                        # Timeout for inactive transfers (10 minutes)
-                        if now - info.get('timestamp', now) > 600:
+                        # Timeout for inactive transfers (1 minute)
+                        if now - info.get('timestamp', now) > 60:
                             to_delete.append(sid)
                             # Cancel associated task if exists
                             task_key = f"task_{sid}"

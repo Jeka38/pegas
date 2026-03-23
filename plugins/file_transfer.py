@@ -185,11 +185,29 @@ class FileTransferPlugin(BasePlugin):
                         if fsize > 0 and get_dir_size(user_dir) + fsize > QUOTA_LIMIT_BYTES:
                              self.bot.send_message(mto=peer_jid, mbody="⚠ Квота превышена!", mtype='chat')
                              return
+                        received = 0
                         with open(part_path, 'wb') as f:
-                            async for chunk in resp.content.iter_chunked(1048576):
-                                await loop.run_in_executor(None, f.write, chunk)
+                            while True:
+                                try:
+                                    chunk = await asyncio.wait_for(resp.content.read(1048576), timeout=60)
+                                    if not chunk:
+                                        break
+                                    await loop.run_in_executor(None, f.write, chunk)
+                                    received += len(chunk)
+                                except asyncio.TimeoutError:
+                                    logging.error(f"OOB TIMEOUT: {url}, no data for 60s")
+                                    self.bot.send_message(mto=peer_jid, mbody="⚠️ Ошибка: Превышено время ожидания данных (1 мин). Файл удалён, попробуйте отправить снова.", mtype='chat')
+                                    raise
                             await loop.run_in_executor(None, f.flush)
                             await loop.run_in_executor(None, os.fsync, f.fileno())
+
+                        if fsize > 0 and received != fsize:
+                             logging.error(f"OOB INCOMPLETE: {url}, received {received}/{fsize}")
+                             self.bot.send_message(mto=peer_jid, mbody="⚠️ Ошибка: Файл получен не полностью. Пожалуйста, попробуйте отправить снова.", mtype='chat')
+                             if os.path.exists(part_path):
+                                 os.remove(part_path)
+                             return
+
                         os.rename(part_path, path)
                         real_fname = os.path.basename(path)
                         self.bot.send_message(mto=peer_jid, mbody=f"✅ Готово!\n{self.bot.base_url}/{user_hash}/{safe_quote(real_fname)}", mtype='chat')
@@ -521,14 +539,21 @@ class FileTransferPlugin(BasePlugin):
             with open(part_path, 'wb') as f:
                 while received < file_info['size']:
                     try:
-                        if hasattr(reader, 'recv_queue'): chunk = await reader.recv_queue.get()
-                        else: chunk = await reader.read(min(file_info['size'] - received, 1048576))
+                        if hasattr(reader, 'recv_queue'):
+                            chunk = await asyncio.wait_for(reader.recv_queue.get(), timeout=60)
+                        else:
+                            chunk = await asyncio.wait_for(reader.read(min(file_info['size'] - received, 1048576)), timeout=60)
+
                         if not chunk:
                             break
                         await loop.run_in_executor(None, f.write, chunk)
                         received += len(chunk)
                         if sid in self.bot.pending_files:
                             self.bot.pending_files[sid]['timestamp'] = loop.time()
+                    except asyncio.TimeoutError:
+                        logging.error(f"DOWNLOAD TIMEOUT: sid={sid}, no data for 60s")
+                        self.bot.send_message(mto=peer_jid, mbody="⚠️ Ошибка: Превышено время ожидания данных (1 мин). Файл удалён, попробуйте отправить снова.", mtype='chat')
+                        raise
                     except (asyncio.CancelledError, Exception):
                         raise
                 await loop.run_in_executor(None, f.flush)
@@ -540,7 +565,9 @@ class FileTransferPlugin(BasePlugin):
                 self.bot.send_message(mto=peer_jid, mbody=f"✅ Готово!\n{self.bot.base_url}/{user_hash}/{safe_quote(os.path.basename(path))}", mtype='chat')
             else:
                 logging.error(f"DOWNLOAD INCOMPLETE: sid={sid}, received {received}/{file_info['size']}")
-                if os.path.exists(part_path): os.remove(part_path)
+                self.bot.send_message(mto=peer_jid, mbody="⚠️ Ошибка: Файл получен не полностью. Пожалуйста, попробуйте отправить снова.", mtype='chat')
+                if os.path.exists(part_path):
+                    os.remove(part_path)
         except (asyncio.CancelledError, Exception) as e:
             logging.error(f"DOWNLOAD {'CANCELLED' if isinstance(e, asyncio.CancelledError) else 'ERROR'}: sid={sid}, error={e}")
             if os.path.exists(part_path): os.remove(part_path)
