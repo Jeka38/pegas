@@ -105,7 +105,17 @@ class CommandsPlugin(BasePlugin):
                     if src and os.path.exists(src):
                         try:
                             final_dst = dst
-                            if os.path.isdir(dst): final_dst = os.path.join(dst, os.path.basename(src.rstrip('/')))
+                            if os.path.isdir(dst):
+                                final_dst = os.path.join(dst, os.path.basename(src.rstrip('/')))
+                            else:
+                                # Если это переименование файла, сохраняем исходное расширение
+                                if os.path.isfile(src):
+                                    _, original_ext = os.path.splitext(src)
+                                    # Просто добавляем расширение к тому, что ввел юзер
+                                    # Но если юзер ввел имя которое УЖЕ заканчивается на это расширение, не дублируем
+                                    if not final_dst.lower().endswith(original_ext.lower()):
+                                        final_dst += original_ext
+
                             rel_dst = os.path.relpath(final_dst, user_dir)
                             is_dir = os.path.isdir(src)
                             limit = MAX_DIR_DEPTH if not is_dir else MAX_DIR_DEPTH - 1
