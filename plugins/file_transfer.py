@@ -627,6 +627,7 @@ class FileTransferPlugin(BasePlugin):
 
                 session_sid, ft_ns = file_info.get('session_sid'), file_info.get('ft_ns')
                 if session_sid and ft_ns:
+                    logging.info(f"JINGLE COMPLETE: Sending session-info (received) and session-terminate (success) for sid={session_sid}")
                     # session-info with <received/>
                     info_iq = self.bot.make_iq_set(ito=peer_jid)
                     res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-info', 'sid': session_sid})
