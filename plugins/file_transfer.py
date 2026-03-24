@@ -6,6 +6,8 @@ import asyncio
 import logging
 import aiohttp
 import base64
+import ipaddress
+import urllib.parse
 from slixmpp.xmlstream import ET, matcher, handler
 from config import ADMIN_JID, ADMIN_NOTIFY_LEVEL, QUOTA_LIMIT_BYTES, SOCKS5_PORT, SOCKS5_IP
 from utils import get_dir_size, safe_quote, get_unique_path
@@ -270,10 +272,35 @@ class FileTransferPlugin(BasePlugin):
 
     async def download_from_url(self, url, fname, peer_jid):
         logging.info(f"Downloading OOB from {url}")
+
+        # SSRF Protection: Resolve and validate IP address
+        try:
+            parsed_url = urllib.parse.urlparse(url)
+            host = parsed_url.hostname
+            if not host:
+                logging.error(f"OOB: Invalid URL host in {url}")
+                return
+            addr_info = await asyncio.get_event_loop().getaddrinfo(host, parsed_url.port or (443 if parsed_url.scheme == 'https' else 80))
+            for family, _, _, _, sockaddr in addr_info:
+                ip_addr = ipaddress.ip_address(sockaddr[0])
+                if ip_addr.is_private or ip_addr.is_loopback or ip_addr.is_link_local:
+                    logging.error(f"OOB: SSRF attempt blocked for {url} (IP: {ip_addr})")
+                    self.bot.send_message(mto=peer_jid, mbody=f"⚠️ Ошибка: Доступ к этому адресу запрещён.", mtype='chat')
+                    return
+        except Exception as e:
+            logging.error(f"OOB: SSRF check error for {url}: {e}")
+            return
+
+        # Improved filename extraction
+        if not fname or fname == os.path.basename(url):
+            path_part = parsed_url.path
+            fname = os.path.basename(path_part) if path_part.strip('/') else "downloaded_file"
+
         from utils import is_php_file
         if is_php_file(fname):
             self.bot.send_message(mto=peer_jid, mbody=f"⚠️ Ошибка: Загрузка PHP-файлов запрещена ({fname})", mtype='chat')
             return
+
         user_dir, user_hash = self.bot.get_user_info(peer_jid)
         fname = os.path.basename(fname).replace(' ', '_')
         path = get_unique_path(os.path.join(user_dir, fname))
@@ -284,9 +311,15 @@ class FileTransferPlugin(BasePlugin):
                 async with session.get(url, timeout=300) as resp:
                     if resp.status == 200:
                         fsize = int(resp.headers.get('Content-Length', 0))
+                        # Limit arbitrary URL downloads to 500MB
+                        MAX_OOB_SIZE = 500 * 1024 * 1024
+                        if fsize > MAX_OOB_SIZE:
+                            self.bot.send_message(mto=peer_jid, mbody="⚠️ Ошибка: Размер файла превышает лимит (500 МБ).", mtype='chat')
+                            return
                         if fsize > 0 and get_dir_size(user_dir) + fsize > QUOTA_LIMIT_BYTES:
                              self.bot.send_message(mto=peer_jid, mbody="⚠ Квота превышена!", mtype='chat')
                              return
+
                         received = 0
                         with open(part_path, 'wb') as f:
                             while True:
@@ -296,6 +329,11 @@ class FileTransferPlugin(BasePlugin):
                                         break
                                     await loop.run_in_executor(None, f.write, chunk)
                                     received += len(chunk)
+                                    if received > MAX_OOB_SIZE:
+                                        logging.error(f"OOB: File exceeded 500MB limit during download: {url}")
+                                        self.bot.send_message(mto=peer_jid, mbody="⚠️ Ошибка: Размер файла превышает лимит (500 МБ).", mtype='chat')
+                                        if os.path.exists(part_path): os.remove(part_path)
+                                        return
                                 except asyncio.TimeoutError:
                                     logging.error(f"OOB TIMEOUT: {url}, no data for 60s")
                                     self.bot.send_message(mto=peer_jid, mbody="⚠️ Ошибка: Файл получен не полностью. Пожалуйста, попробуйте отправить снова.", mtype='chat')
@@ -313,7 +351,9 @@ class FileTransferPlugin(BasePlugin):
                         os.rename(part_path, path)
                         real_fname = os.path.basename(path)
                         self.bot.send_message(mto=peer_jid, mbody=f"✅ Готово!\n{self.bot.base_url}/{user_hash}/{safe_quote(real_fname)}", mtype='chat')
-                    else: logging.error(f"OOB download failed: HTTP {resp.status}")
+                    else:
+                        logging.error(f"OOB download failed: HTTP {resp.status}")
+                        self.bot.send_message(mto=peer_jid, mbody=f"⚠️ Ошибка: Не удалось загрузить файл (HTTP {resp.status})", mtype='chat')
         except Exception as e:
             logging.error(f"OOB download error: {e}")
             if os.path.exists(part_path): os.remove(part_path)
