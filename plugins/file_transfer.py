@@ -127,16 +127,26 @@ class FileTransferPlugin(BasePlugin):
         return has_ft_ns
 
     def _to_log_str(self, xml):
+        # Оптимизация: не делаем deepcopy для данных IBB/BoB, если они огромные
+        has_large_data = False
+        for tag in ('{http://jabber.org/protocol/ibb}data', '{urn:xmpp:bob}data'):
+            el = xml.find(f'.//{tag}')
+            if el is not None and el.text and len(el.text) > 200:
+                has_large_data = True; break
+
+        if not has_large_data:
+            return ET.tostring(xml, encoding='unicode')
+
         xml_copy = copy.deepcopy(xml)
-        for data in xml_copy.findall('.//{http://jabber.org/protocol/ibb}data'):
-            if data.text and len(data.text) > 100:
-                data.text = data.text[:50] + f"...[TRUNCATED {len(data.text)} bytes]..." + data.text[-10:]
-        for data in xml_copy.findall('.//{urn:xmpp:bob}data'):
-            if data.text and len(data.text) > 100:
-                data.text = data.text[:50] + f"...[TRUNCATED {len(data.text)} bytes]..." + data.text[-10:]
+        for tag in ('{http://jabber.org/protocol/ibb}data', '{urn:xmpp:bob}data'):
+            for data in xml_copy.findall(f'.//{tag}'):
+                if data.text and len(data.text) > 100:
+                    data.text = data.text[:50] + f"...[TRUNCATED {len(data.text)} bytes]..." + data.text[-10:]
+
         if xml_copy.tag.endswith('}data') and ('http://jabber.org/protocol/ibb' in xml_copy.tag or 'urn:xmpp:bob' in xml_copy.tag):
             if xml_copy.text and len(xml_copy.text) > 100:
                 xml_copy.text = xml_copy.text[:50] + f"...[TRUNCATED {len(xml_copy.text)} bytes]..." + xml_copy.text[-10:]
+
         return ET.tostring(xml_copy, encoding='unicode')
 
     def handle_xml_in(self, xml):
@@ -387,8 +397,8 @@ class FileTransferPlugin(BasePlugin):
                         for p_host, p_jid in [('proxy.eu.jabber.network', 'proxy.eu.jabber.network'), ('proxy.jabber.ru', 'proxy.jabber.ru')]:
                             ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=p_host, port='1080', jid=p_jid, cid=hashlib.md5(p_jid.encode()).hexdigest(), priority='65536', type='proxy')
                     elif ibb_t is not None:
-                        b_size = int(ibb_t.get('block-size', '8192'))
-                        use_msg = ibb_t.get('stanzas') == 'message'
+                        b_size = int(ibb_t.get('block-size', '16384'))
+                        use_msg = ibb_t.get('stanzas') == 'message' or True
                         ibb_attrs = {'block-size': str(b_size), 'sid': transport_sid}
                         if use_msg: ibb_attrs['stanzas'] = 'message'
                         ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ibb:1}transport', ibb_attrs)
@@ -397,9 +407,9 @@ class FileTransferPlugin(BasePlugin):
                         asyncio.create_task(self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, transport_sid, iq['from'], stream))
                         self.bot.event('ibb_stream_start', stream)
                     else:
-                        ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ibb:1}transport', {'block-size': '8192', 'sid': sid})
+                        ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ibb:1}transport', {'block-size': '16384', 'sid': sid, 'stanzas': 'message'})
                         from slixmpp.plugins.xep_0047 import IBBytestream
-                        stream = IBBytestream(self.bot, sid, 8192, self.bot.boundjid, iq['from'], False)
+                        stream = IBBytestream(self.bot, sid, 16384, self.bot.boundjid, iq['from'], True)
                         asyncio.create_task(self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, sid, iq['from'], stream))
                         self.bot.event('ibb_stream_start', stream)
 
@@ -430,12 +440,10 @@ class FileTransferPlugin(BasePlugin):
                             reply = self.bot.make_iq_set(ito=iq['from'])
                             res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'transport-accept', 'sid': sid, 'initiator': iq['from'].full})
                             res_c = ET.SubElement(res_j, '{urn:xmpp:jingle:1}content', {'creator': content.get('creator'), 'name': content.get('name')})
-                            use_msg = ibb_t.get('stanzas') == 'message'
-                            ibb_attrs = {'sid': ibb_sid}
-                            if use_msg: ibb_attrs['stanzas'] = 'message'
+                            ibb_attrs = {'sid': ibb_sid, 'block-size': '16384', 'stanzas': 'message'}
                             ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ibb:1}transport', ibb_attrs)
                             from slixmpp.plugins.xep_0047 import IBBytestream
-                            stream = IBBytestream(self.bot, ibb_sid, 8192, self.bot.boundjid, iq['from'], use_msg)
+                            stream = IBBytestream(self.bot, ibb_sid, 16384, self.bot.boundjid, iq['from'], True)
                             asyncio.create_task(self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, ibb_sid, iq['from'], stream))
                             self.bot.event('ibb_stream_start', stream)
                             reply.append(res_j); reply.send()
@@ -604,12 +612,12 @@ class FileTransferPlugin(BasePlugin):
                 reply = self.bot.make_iq_set(ito=iq['from'])
                 res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'transport-replace', 'sid': sid, 'initiator': iq['from'].full})
                 res_c = ET.SubElement(res_j, '{urn:xmpp:jingle:1}content', {'creator': file_info.get('content_creator', 'initiator'), 'name': file_info.get('content_name', 'file')})
-                use_msg = self.bot.pending_files.get(sid, {}).get('ibb_stanzas') == 'message'
-                ibb_attrs = {'sid': new_ibb_sid, 'block-size': '8192'}
+                use_msg = self.bot.pending_files.get(sid, {}).get('ibb_stanzas') == 'message' or True
+                ibb_attrs = {'sid': new_ibb_sid, 'block-size': '16384'}
                 if use_msg: ibb_attrs['stanzas'] = 'message'
                 ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ibb:1}transport', ibb_attrs)
                 from slixmpp.plugins.xep_0047 import IBBytestream
-                stream = IBBytestream(self.bot, new_ibb_sid, 8192, self.bot.boundjid, iq['from'], use_msg)
+                stream = IBBytestream(self.bot, new_ibb_sid, 16384, self.bot.boundjid, iq['from'], use_msg)
                 asyncio.create_task(self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, new_ibb_sid, iq['from'], stream))
                 self.bot.event('ibb_stream_start', stream)
                 reply.append(res_j); reply.send()
