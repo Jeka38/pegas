@@ -40,7 +40,6 @@ class FileTransferPlugin(BasePlugin):
         'urn:xmpp:jingle:apps:file-transfer:4',
         'urn:xmpp:jingle:apps:file-transfer:5',
         'urn:xmpp:jingle:transports:s5b:1',
-        'urn:xmpp:jingle:transports:ibb:1',
         'jabber:iq:oob',
         'jabber:x:oob',
         'urn:xmpp:bob',
@@ -372,17 +371,19 @@ class FileTransferPlugin(BasePlugin):
                     iq.error('not-acceptable').send()
                     return
 
-                ibb_t, s5b_t = content.find('{urn:xmpp:jingle:transports:ibb:1}transport'), content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
-                if s5b_t is not None and s5b_t.get('sid'): transport_sid = s5b_t.get('sid')
-                elif ibb_t is not None and ibb_t.get('sid'): transport_sid = ibb_t.get('sid')
-                else: transport_sid = sid
+                s5b_t = content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
+                if s5b_t is None or not s5b_t.get('sid'):
+                    logging.warning(f"JINGLE: Ignoring session-initiate without S5B transport from {iq['from']}")
+                    iq.error('feature-not-implemented').send()
+                    return
+
+                transport_sid = s5b_t.get('sid')
 
                 self.bot.pending_files[sid] = {
                     'name': fname, 'size': fsize, 'timestamp': asyncio.get_event_loop().time(),
-                    'peer_jid': iq['from'], 'ibb_allowed': True,
+                    'peer_jid': iq['from'], 'ibb_allowed': False,
                     'content_name': content.get('name'), 'content_creator': content.get('creator'),
                     'ft_ns': ft_ns, 'transport_sid': transport_sid, 's5b_connecting': False,
-                    'ibb_stanzas': ibb_t.get('stanzas') if ibb_t is not None else None,
                     'session_sid': sid, 'downloading': False
                 }
                 if transport_sid != sid: self.bot.pending_files[transport_sid] = self.bot.pending_files[sid]
@@ -403,30 +404,13 @@ class FileTransferPlugin(BasePlugin):
                     ET.SubElement(res_f, f'{{{ft_ns}}}name').text = fname
                     ET.SubElement(res_f, f'{{{ft_ns}}}size').text = str(fsize)
 
-                    if s5b_t is not None:
-                        res_t = ET.SubElement(res_c, '{urn:xmpp:jingle:transports:s5b:1}transport', {'sid': transport_sid, 'mode': 'tcp'})
-                        local_ip = self.get_local_ip()
-                        ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=local_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-local', priority='8253074', type='host')
-                        if SOCKS5_IP and SOCKS5_IP != local_ip:
-                            ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=SOCKS5_IP, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-public', priority='8252818', type='host')
-                        for p_host, p_jid in [('proxy.eu.jabber.network', 'proxy.eu.jabber.network'), ('proxy.jabber.ru', 'proxy.jabber.ru')]:
-                            ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=p_host, port='1080', jid=p_jid, cid=hashlib.md5(p_jid.encode()).hexdigest(), priority='65536', type='proxy')
-                    elif ibb_t is not None:
-                        b_size = int(ibb_t.get('block-size', '32768'))
-                        use_msg = ibb_t.get('stanzas') == 'message' or True
-                        ibb_attrs = {'block-size': str(b_size), 'sid': transport_sid}
-                        if use_msg: ibb_attrs['stanzas'] = 'message'
-                        ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ibb:1}transport', ibb_attrs)
-                        from slixmpp.plugins.xep_0047 import IBBytestream
-                        stream = IBBytestream(self.bot, transport_sid, b_size, self.bot.boundjid, iq['from'], use_msg)
-                        self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, transport_sid, iq['from'], stream)
-                        self.bot.event('ibb_stream_start', stream)
-                    else:
-                        ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ibb:1}transport', {'block-size': '32768', 'sid': sid, 'stanzas': 'message'})
-                        from slixmpp.plugins.xep_0047 import IBBytestream
-                        stream = IBBytestream(self.bot, sid, 32768, self.bot.boundjid, iq['from'], True)
-                        self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, sid, iq['from'], stream)
-                        self.bot.event('ibb_stream_start', stream)
+                    res_t = ET.SubElement(res_c, '{urn:xmpp:jingle:transports:s5b:1}transport', {'sid': transport_sid, 'mode': 'tcp'})
+                    local_ip = self.get_local_ip()
+                    ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=local_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-local', priority='8253074', type='host')
+                    if SOCKS5_IP and SOCKS5_IP != local_ip:
+                        ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=SOCKS5_IP, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-public', priority='8252818', type='host')
+                    for p_host, p_jid in [('proxy.eu.jabber.network', 'proxy.eu.jabber.network'), ('proxy.jabber.ru', 'proxy.jabber.ru')]:
+                        ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=p_host, port='1080', jid=p_jid, cid=hashlib.md5(p_jid.encode()).hexdigest(), priority='65536', type='proxy')
 
                     accept_iq.append(res_j)
                     accept_iq.send()
@@ -453,26 +437,8 @@ class FileTransferPlugin(BasePlugin):
                                 self.bot.pending_files[f"jingle_s5b_info_{sid}"] = asyncio.create_task(self._socks5_connect_and_save(iq, jingle_sid=sid))
                 iq.reply().send()
             elif action == 'transport-replace':
-                content = jingle.find('{urn:xmpp:jingle:1}content')
-                if content is not None:
-                    ibb_t = content.find('{urn:xmpp:jingle:transports:ibb:1}transport')
-                    if ibb_t is not None:
-                        if sid in self.bot.pending_files:
-                            ibb_sid = ibb_t.get('sid')
-                            self.bot.pending_files[sid]['transport_sid'] = ibb_sid
-                            self.bot.pending_files[sid]['ibb_stanzas'] = ibb_t.get('stanzas')
-                            self.bot.pending_files[ibb_sid] = self.bot.pending_files[sid]
-                            reply = self.bot.make_iq_set(ito=iq['from'])
-                            res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'transport-accept', 'sid': sid, 'initiator': iq['from'].full})
-                            res_c = ET.SubElement(res_j, '{urn:xmpp:jingle:1}content', {'creator': content.get('creator'), 'name': content.get('name')})
-                            ibb_attrs = {'sid': ibb_sid, 'block-size': '32768', 'stanzas': 'message'}
-                            ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ibb:1}transport', ibb_attrs)
-                            from slixmpp.plugins.xep_0047 import IBBytestream
-                            stream = IBBytestream(self.bot, ibb_sid, 32768, self.bot.boundjid, iq['from'], True)
-                            self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, ibb_sid, iq['from'], stream)
-                            self.bot.event('ibb_stream_start', stream)
-                            reply.append(res_j)
-                            reply.send()
+                # We do not support transport-replace (especially for IBB)
+                logging.warning(f"JINGLE: Rejecting transport-replace from {iq['from']}")
                 iq.reply().send()
             elif action == 'transport-accept':
                 iq.reply().send()
@@ -661,27 +627,12 @@ class FileTransferPlugin(BasePlugin):
                 except Exception as e:
                     logging.info(f"S5B: Failed connect to {host.get('host')} for sid={sid}: {e}")
                     continue
-            if not jingle_sid: iq.error('service-unavailable').send()
-            elif file_info.get('ibb_allowed'):
-                logging.info(f"SOCKS5 failed for Jingle sid={sid}, falling back to IBB")
-                new_ibb_sid = f"fallback_{sid}"
-                self.bot.pending_files[sid]['transport_sid'] = new_ibb_sid
-                self.bot.pending_files[new_ibb_sid] = self.bot.pending_files[sid]
-                reply = self.bot.make_iq_set(ito=iq['from'])
-                res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'transport-replace', 'sid': sid, 'initiator': iq['from'].full})
-                res_c = ET.SubElement(res_j, '{urn:xmpp:jingle:1}content', {'creator': file_info.get('content_creator', 'initiator'), 'name': file_info.get('content_name', 'file')})
-                use_msg = self.bot.pending_files.get(sid, {}).get('ibb_stanzas') == 'message' or True
-                ibb_attrs = {'sid': new_ibb_sid, 'block-size': '32768'}
-                if use_msg: ibb_attrs['stanzas'] = 'message'
-                ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ibb:1}transport', ibb_attrs)
-                from slixmpp.plugins.xep_0047 import IBBytestream
-                stream = IBBytestream(self.bot, new_ibb_sid, 32768, self.bot.boundjid, iq['from'], use_msg)
-                self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, new_ibb_sid, iq['from'], stream)
-                self.bot.event('ibb_stream_start', stream)
-                reply.append(res_j)
-                reply.send()
+            if not jingle_sid:
+                iq.error('service-unavailable').send()
             else:
-                if sid in self.bot.pending_files: del self.bot.pending_files[sid]
+                logging.info(f"SOCKS5 failed for Jingle sid={sid}, no IBB fallback allowed.")
+                if sid in self.bot.pending_files:
+                    del self.bot.pending_files[sid]
         except Exception as e: logging.error(f"SOCKS5 ERROR: {e}")
 
     def handle_ibb_stream(self, stream):
