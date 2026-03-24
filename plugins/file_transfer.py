@@ -343,7 +343,7 @@ class FileTransferPlugin(BasePlugin):
                 if not self.bot.is_allowed(iq['from']):
                     logging.warning(f"JINGLE access denied for {iq['from']}")
                     self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Доступ запрещён. Пожалуйста, обратитесь к администратору для получения доступа: {ADMIN_JID}", mtype='chat')
-                    reply = iq.reply()
+                    reply = iq.reply(clear=False)
                     reply['type'] = 'error'
                     reply['error']['condition'] = 'not-allowed'
                     reply.send()
@@ -365,7 +365,7 @@ class FileTransferPlugin(BasePlugin):
                 from utils import is_php_file
                 if is_php_file(fname):
                     self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Ошибка: Загрузка PHP-файлов запрещена ({fname})", mtype='chat')
-                    reply = iq.reply()
+                    reply = iq.reply(clear=False)
                     reply['type'] = 'error'
                     reply['error']['condition'] = 'not-acceptable'
                     reply.send()
@@ -374,7 +374,7 @@ class FileTransferPlugin(BasePlugin):
                 except: fsize = 0
                 user_dir, _ = self.bot.get_user_info(iq['from'])
                 if get_dir_size(user_dir) + fsize > QUOTA_LIMIT_BYTES:
-                    reply = iq.reply()
+                    reply = iq.reply(clear=False)
                     reply['type'] = 'error'
                     reply['error']['condition'] = 'not-acceptable'
                     reply.send()
@@ -383,7 +383,7 @@ class FileTransferPlugin(BasePlugin):
                 s5b_t = content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
                 if s5b_t is None or not s5b_t.get('sid'):
                     logging.warning(f"JINGLE: Ignoring session-initiate without S5B transport from {iq['from']}")
-                    reply = iq.reply()
+                    reply = iq.reply(clear=False)
                     reply['type'] = 'error'
                     reply['error']['condition'] = 'feature-not-implemented'
                     reply.send()
@@ -646,7 +646,9 @@ class FileTransferPlugin(BasePlugin):
                         try:
                             act_iq = self.bot.make_iq_set(ito=host.get('jid'))
                             query_act = ET.SubElement(act_iq.xml, '{http://jabber.org/protocol/bytestreams}query', sid=sid)
-                            ET.SubElement(query_act, '{http://jabber.org/protocol/bytestreams}activate').text = iq['from'].full
+                            # XEP-0065: The activate element MUST contain the JID of the Target.
+                            # In this context, the bot is the Target.
+                            ET.SubElement(query_act, '{http://jabber.org/protocol/bytestreams}activate').text = self.bot.boundjid.full
                             await act_iq.send()
                             logging.info(f"S5B: Proxy {host.get('jid')} activated for sid={sid}")
                         except Exception as e:
@@ -668,7 +670,16 @@ class FileTransferPlugin(BasePlugin):
                 reply['error']['condition'] = 'service-unavailable'
                 reply.send()
             else:
-                logging.info(f"SOCKS5 failed for Jingle sid={sid}, no IBB fallback allowed.")
+                logging.info(f"SOCKS5 failed for Jingle sid={sid}, sending session-terminate (connectivity-error)")
+                try:
+                    term_iq = self.bot.make_iq_set(ito=iq['from'])
+                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-terminate', 'sid': sid, 'initiator': iq['from'].full})
+                    reason = ET.SubElement(res_j, '{urn:xmpp:jingle:1}reason')
+                    ET.SubElement(reason, '{urn:xmpp:jingle:1}connectivity-error')
+                    term_iq.append(res_j)
+                    term_iq.send()
+                except Exception as e:
+                    logging.error(f"Error sending session-terminate: {e}")
                 if sid in self.bot.pending_files:
                     del self.bot.pending_files[sid]
         except Exception as e: logging.error(f"SOCKS5 ERROR: {e}")
