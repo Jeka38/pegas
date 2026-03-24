@@ -46,7 +46,7 @@ class OBBFastBot(ClientXMPP):
         # Setup custom Ping handler
         from slixmpp.xmlstream import matcher, handler
         self.register_handler(
-            handler.Callback('Ping', matcher.MatchXPath('iq/{urn:xmpp:ping}ping'), self.handle_ping)
+            handler.Callback('Ping', matcher.MatchXPath('{jabber:client}iq/{urn:xmpp:ping}ping'), self.handle_ping)
         )
 
         # Load logical modules (plugins)
