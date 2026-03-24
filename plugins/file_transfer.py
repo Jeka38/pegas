@@ -43,7 +43,8 @@ class FileTransferPlugin(BasePlugin):
         'http://jabber.org/protocol/ibb',
         'jabber:iq:oob',
         'jabber:x:oob',
-        'urn:xmpp:bob'
+        'urn:xmpp:bob',
+        'urn:xmpp:thumbs:1'
     }
 
     def __init__(self, bot):
@@ -159,6 +160,39 @@ class FileTransferPlugin(BasePlugin):
                 stanza_id = xml.get('id')
                 if stanza_id: self._tracked_ft_ids.discard(stanza_id)
 
+    async def request_bob_data(self, to_jid, cid_uri, fname):
+        cid = cid_uri.replace('cid:', '')
+        iq = self.bot.make_iq(itype='get', ito=to_jid)
+        ET.SubElement(iq.xml, '{urn:xmpp:bob}data', cid=cid)
+        try:
+            resp = await iq.send()
+            bob_data = resp.xml.find('{urn:xmpp:bob}data')
+            if bob_data is not None and bob_data.text:
+                data = base64.b64decode(bob_data.text)
+                await self._save_thumb(to_jid, fname, data)
+        except Exception as e:
+            logging.error(f"BoB request error for {cid}: {e}")
+
+    async def _save_thumb(self, peer_jid, fname, data):
+        user_dir, _ = self.bot.get_user_info(peer_jid)
+        thumb_dir = os.path.join(user_dir, '_sfpg_data', 'thumb')
+        loop = asyncio.get_event_loop()
+
+        def _do_save():
+            os.makedirs(thumb_dir, exist_ok=True)
+            # Sanitize filename to prevent path traversal
+            safe_fname = os.path.basename(fname)
+            thumb_path = os.path.join(thumb_dir, safe_fname + ".jpg")
+            with open(thumb_path, 'wb') as f:
+                f.write(data)
+            return thumb_path
+
+        try:
+            thumb_path = await loop.run_in_executor(None, _do_save)
+            logging.info(f"Thumbnail saved to {thumb_path}")
+        except Exception as e:
+            logging.error(f"Error saving thumbnail for {fname}: {e}")
+
     def handle_iq_oob(self, iq):
         query = iq.xml.find('{jabber:iq:oob}query')
         if query is None: return
@@ -269,10 +303,17 @@ class FileTransferPlugin(BasePlugin):
                 'peer_jid': iq['from'], 'ibb_allowed': True,
                 'content_name': content.get('name'), 'content_creator': content.get('creator'),
                 'ft_ns': ft_ns, 'transport_sid': transport_sid, 's5b_connecting': False,
-                'ibb_stanzas': ibb_t.get('stanzas') if ibb_t is not None else None
+                'ibb_stanzas': ibb_t.get('stanzas') if ibb_t is not None else None,
+                'session_sid': sid
             }
             if transport_sid != sid: self.bot.pending_files[transport_sid] = self.bot.pending_files[sid]
             iq.reply().send()
+
+            thumb_tag = file_tag.find('{urn:xmpp:thumbs:1}thumbnail')
+            if thumb_tag is not None:
+                uri = thumb_tag.get('uri')
+                if uri and uri.startswith('cid:'):
+                    asyncio.create_task(self.request_bob_data(iq['from'], uri, fname))
             try:
                 accept_iq = self.bot.make_iq_set(ito=iq['from'])
                 res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-accept', 'sid': sid, 'initiator': iq['from'].full})
@@ -583,6 +624,23 @@ class FileTransferPlugin(BasePlugin):
                 os.rename(part_path, path)
                 logging.info(f"DOWNLOAD COMPLETE: sid={sid}, path={path}")
                 self.bot.send_message(mto=peer_jid, mbody=f"✅ Готово!\n{self.bot.base_url}/{user_hash}/{safe_quote(os.path.basename(path))}", mtype='chat')
+
+                session_sid, ft_ns = file_info.get('session_sid'), file_info.get('ft_ns')
+                if session_sid and ft_ns:
+                    # session-info with <received/>
+                    info_iq = self.bot.make_iq_set(ito=peer_jid)
+                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-info', 'sid': session_sid})
+                    ET.SubElement(res_j, f'{{{ft_ns}}}received')
+                    info_iq.append(res_j)
+                    info_iq.send()
+
+                    # session-terminate with <success/>
+                    term_iq = self.bot.make_iq_set(ito=peer_jid)
+                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-terminate', 'sid': session_sid})
+                    reason = ET.SubElement(res_j, '{urn:xmpp:jingle:1}reason')
+                    ET.SubElement(reason, '{urn:xmpp:jingle:1}success')
+                    term_iq.append(res_j)
+                    term_iq.send()
             else:
                 logging.error(f"DOWNLOAD INCOMPLETE: sid={sid}, received {received}/{file_info['size']}")
                 self.bot.send_message(mto=peer_jid, mbody="⚠️ Ошибка: Файл получен не полностью. Пожалуйста, попробуйте отправить снова.", mtype='chat')

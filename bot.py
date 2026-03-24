@@ -62,6 +62,9 @@ class OBBFastBot(ClientXMPP):
         reply.send()
         logging.info(f"PONG SENT to {iq['from']}")
 
+    def make_iq_set(self, ito=None, ifrom=None):
+        return self.make_iq(itype='set', ito=ito, ifrom=ifrom)
+
     async def cleanup_pending_files(self):
         while True:
             try:
