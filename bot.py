@@ -31,7 +31,7 @@ class OBBFastBot(ClientXMPP):
         self.register_plugin('xep_0030')
         self.register_plugin('xep_0047')
         self['xep_0047'].auto_accept = True
-        self['xep_0047'].block_size = 8192
+        self['xep_0047'].block_size = 32768
         self['xep_0047'].max_block_size = 65536
         self.register_plugin('xep_0199')
         self['xep_0199'].send_keepalive = True
@@ -56,11 +56,15 @@ class OBBFastBot(ClientXMPP):
 
 
     def handle_ping(self, iq):
+        if iq['type'] in ('error', 'result'): return
         logging.info(f"PING RECV from {iq['from']}")
         reply = iq.reply()
         reply.append(ET.Element('{urn:xmpp:ping}ping'))
         reply.send()
         logging.info(f"PONG SENT to {iq['from']}")
+
+    def make_iq_set(self, ito=None, ifrom=None):
+        return self.make_iq(itype='set', ito=ito, ifrom=ifrom)
 
     async def cleanup_pending_files(self):
         while True:
@@ -68,7 +72,7 @@ class OBBFastBot(ClientXMPP):
                 await asyncio.sleep(60)
                 now = asyncio.get_event_loop().time()
                 to_delete = []
-                for sid, info in self.pending_files.items():
+                for sid, info in list(self.pending_files.items()):
                     if isinstance(info, dict):
                         # Timeout for inactive transfers (1 minute)
                         if now - info.get('timestamp', now) > 60:
