@@ -343,7 +343,8 @@ class FileTransferPlugin(BasePlugin):
                 if not self.bot.is_allowed(iq['from']):
                     logging.warning(f"JINGLE access denied for {iq['from']}")
                     self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Доступ запрещён. Пожалуйста, обратитесь к администратору для получения доступа: {ADMIN_JID}", mtype='chat')
-                    reply = iq.error()
+                    reply = iq.reply()
+                    reply['type'] = 'error'
                     reply['error']['condition'] = 'not-allowed'
                     reply.send()
                     return
@@ -364,7 +365,8 @@ class FileTransferPlugin(BasePlugin):
                 from utils import is_php_file
                 if is_php_file(fname):
                     self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Ошибка: Загрузка PHP-файлов запрещена ({fname})", mtype='chat')
-                    reply = iq.error()
+                    reply = iq.reply()
+                    reply['type'] = 'error'
                     reply['error']['condition'] = 'not-acceptable'
                     reply.send()
                     return
@@ -372,7 +374,8 @@ class FileTransferPlugin(BasePlugin):
                 except: fsize = 0
                 user_dir, _ = self.bot.get_user_info(iq['from'])
                 if get_dir_size(user_dir) + fsize > QUOTA_LIMIT_BYTES:
-                    reply = iq.error()
+                    reply = iq.reply()
+                    reply['type'] = 'error'
                     reply['error']['condition'] = 'not-acceptable'
                     reply.send()
                     return
@@ -380,7 +383,8 @@ class FileTransferPlugin(BasePlugin):
                 s5b_t = content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
                 if s5b_t is None or not s5b_t.get('sid'):
                     logging.warning(f"JINGLE: Ignoring session-initiate without S5B transport from {iq['from']}")
-                    reply = iq.error()
+                    reply = iq.reply()
+                    reply['type'] = 'error'
                     reply['error']['condition'] = 'feature-not-implemented'
                     reply.send()
                     return
@@ -462,7 +466,8 @@ class FileTransferPlugin(BasePlugin):
         except Exception as e:
             logging.error(f"JINGLE IQ ERROR: {e}")
             try:
-                reply = iq.error()
+                reply = iq.reply()
+                reply['type'] = 'error'
                 reply['error']['condition'] = 'internal-server-error'
                 reply.send()
             except: pass
@@ -472,7 +477,8 @@ class FileTransferPlugin(BasePlugin):
         if not self.bot.is_allowed(iq['from']):
             logging.warning(f"SI access denied for {iq['from']}")
             self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Доступ запрещён. Пожалуйста, обратитесь к администратору для получения доступа: {ADMIN_JID}", mtype='chat')
-            reply = iq.error()
+            reply = iq.reply()
+            reply['type'] = 'error'
             reply['error']['condition'] = 'not-allowed'
             reply.send()
             return
@@ -484,13 +490,15 @@ class FileTransferPlugin(BasePlugin):
             from utils import is_php_file
             if is_php_file(fname):
                 self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Ошибка: Загрузка PHP-файлов запрещена ({fname})", mtype='chat')
-                reply = iq.error()
+                reply = iq.reply()
+                reply['type'] = 'error'
                 reply['error']['condition'] = 'not-acceptable'
                 reply.send()
                 return
             user_dir, _ = self.bot.get_user_info(iq['from'])
             if get_dir_size(user_dir) + fsize > QUOTA_LIMIT_BYTES:
-                reply = iq.error()
+                reply = iq.reply()
+                reply['type'] = 'error'
                 reply['error']['condition'] = 'not-acceptable'
                 reply.send()
                 return
@@ -505,7 +513,8 @@ class FileTransferPlugin(BasePlugin):
                         offered_methods.extend([v.text for v in field.findall('{jabber:x:data}option/{jabber:x:data}value')])
             chosen_method = next((m for m in ['jabber:iq:oob', 'http://jabber.org/protocol/bytestreams', 'http://jabber.org/protocol/ibb'] if m in offered_methods), None)
             if not chosen_method:
-                reply = iq.error()
+                reply = iq.reply()
+                reply['type'] = 'error'
                 reply['error']['condition'] = 'bad-request'
                 reply.send()
                 return
@@ -525,7 +534,8 @@ class FileTransferPlugin(BasePlugin):
         except Exception as e:
             logging.error(f"SI ERROR: {e}")
             try:
-                reply = iq.error()
+                reply = iq.reply()
+                reply['type'] = 'error'
                 reply['error']['condition'] = 'internal-server-error'
                 reply.send()
             except: pass
@@ -562,7 +572,8 @@ class FileTransferPlugin(BasePlugin):
                     if proxy:
                         hosts = [ET.Element('streamhost', host=proxy['host'], port=str(proxy['port']), jid=jid)]
                     else:
-                        reply = iq.error()
+                        reply = iq.reply()
+                        reply['type'] = 'error'
                         reply['error']['condition'] = 'item-not-found'
                         reply.send()
                         return
@@ -652,7 +663,8 @@ class FileTransferPlugin(BasePlugin):
                     logging.info(f"S5B: Failed connect to {host.get('host')} for sid={sid}: {e}")
                     continue
             if not jingle_sid:
-                reply = iq.error()
+                reply = iq.reply()
+                reply['type'] = 'error'
                 reply['error']['condition'] = 'service-unavailable'
                 reply.send()
             else:
