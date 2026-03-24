@@ -28,7 +28,11 @@ class FileTransferPlugin(BasePlugin):
         'proxy.yax.im': {'host': 'proxy.yax.im', 'port': 1080},
     }
 
-    FT_NAMESPACES = {
+    FT_NAMESPACES = [
+        'http://jabber.org/protocol/si',
+        'http://jabber.org/protocol/si/profile/file-transfer',
+        'http://jabber.org/protocol/bytestreams',
+        'http://jabber.org/protocol/ibb',
         'urn:xmpp:jingle:1',
         'urn:xmpp:jingle:apps:file-transfer:1',
         'urn:xmpp:jingle:apps:file-transfer:2',
@@ -37,15 +41,11 @@ class FileTransferPlugin(BasePlugin):
         'urn:xmpp:jingle:apps:file-transfer:5',
         'urn:xmpp:jingle:transports:s5b:1',
         'urn:xmpp:jingle:transports:ibb:1',
-        'http://jabber.org/protocol/si',
-        'http://jabber.org/protocol/si/profile/file-transfer',
-        'http://jabber.org/protocol/bytestreams',
-        'http://jabber.org/protocol/ibb',
         'jabber:iq:oob',
         'jabber:x:oob',
         'urn:xmpp:bob',
         'urn:xmpp:thumbs:1'
-    }
+    ]
 
     def __init__(self, bot):
         super().__init__(bot)
