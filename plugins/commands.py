@@ -60,6 +60,15 @@ class CommandsPlugin(BasePlugin):
                     try: os.makedirs(target, exist_ok=True); self.reply(msg, f"📁 Директория создана: {rel}")
                     except Exception as e: self.reply(msg, f"❌ Ошибка: {e}")
             else: self.reply(msg, "❌ Недопустимый путь")
+        elif cmd == 'get' and len(parts) == 2:
+            cmd_executed = True
+            items = get_all_items(user_dir)
+            path = resolve_item(user_dir, parts[1], items)
+            if path and os.path.isfile(path):
+                import asyncio
+                asyncio.create_task(self.bot.file_transfer.initiate_jingle_transfer(msg['from'], path))
+                self.reply(msg, f"🚀 Начинаю передачу файла: {os.path.basename(path)}")
+            else: self.reply(msg, "❌ Файл не найден")
         elif cmd == 'rmdir' and len(parts) == 2:
             cmd_executed = True
             items = get_all_items(user_dir)

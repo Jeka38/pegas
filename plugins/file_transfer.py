@@ -5,7 +5,8 @@ import hashlib
 import asyncio
 import logging
 import aiohttp
-import base64  # ДОБАВЛЕНО ДЛЯ РАСПАКОВКИ IBB MESSAGE
+import base64
+import uuid
 from slixmpp.xmlstream import ET, matcher, handler
 from config import ADMIN_JID, ADMIN_NOTIFY_LEVEL, QUOTA_LIMIT_BYTES, SOCKS5_PORT, SOCKS5_IP
 from utils import get_dir_size, safe_quote, get_unique_path
@@ -136,7 +137,10 @@ class FileTransferPlugin(BasePlugin):
                 writer.write(b"\x05\x00\x00\x03" + bytes([len(dst_addr)]) + dst_addr.encode() + b"\x00\x00")
                 await writer.drain()
                 file_info['downloading'] = True
-                await self.download_file_task(reader, file_info, file_info['peer_jid'], sid_match)
+                if file_info.get('mode') == 'send':
+                    await self.upload_file_task(writer, file_info, file_info['peer_jid'], sid_match)
+                else:
+                    await self.download_file_task(reader, file_info, file_info['peer_jid'], sid_match)
             else:
                 logging.warning(f"SOCKS5 inbound: No match or already downloading for {dst_addr}")
                 writer.write(b"\x05\x04"); await writer.drain()
@@ -334,6 +338,7 @@ class FileTransferPlugin(BasePlugin):
             if content is not None:
                 transport = content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
                 if transport is not None:
+                    file_info = self.bot.pending_files.get(sid)
                     # Case 1: peer selected a candidate
                     used = transport.find('{urn:xmpp:jingle:transports:s5b:1}candidate-used')
                     if used is not None:
@@ -341,10 +346,10 @@ class FileTransferPlugin(BasePlugin):
                         logging.info(f"JINGLE transport-info: peer used candidate cid={cid} for sid={sid}")
                         if cid == 'direct-host':
                             logging.info(f"JINGLE: peer is connecting to our local SOCKS5 server.")
-                        else:
-                            # If it's a proxy, we might need to activate it (XEP-0260)
-                            # But usually, the initiator activates it after candidate-used is exchanged.
-                            # We are the responder here.
+                        elif file_info and file_info.get('mode') == 'send':
+                            # If we are initiator and peer chose a proxy, we might need to activate it
+                            # Actually XEP-0260 says the responder sends candidate-used, then initiator sends it back if it agrees.
+                            # For simplicity, if we are sending and peer chose a candidate, we've likely already started or will start.
                             pass
 
                     # Case 2: peer provided new candidates
@@ -381,6 +386,26 @@ class FileTransferPlugin(BasePlugin):
 
                         reply.append(res_j); reply.send()
                         return # Jingle result sent as transport-accept
+            iq.reply().send()
+        elif action == 'session-accept':
+            if sid in self.bot.pending_files:
+                file_info = self.bot.pending_files[sid]
+                content = jingle.find('{urn:xmpp:jingle:1}content')
+                if content is not None:
+                    s5b_t = content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
+                    ibb_t = content.find('{urn:xmpp:jingle:transports:ibb:1}transport')
+                    if s5b_t is not None:
+                        self.bot.pending_files[f"jingle_s5b_accept_{sid}"] = asyncio.create_task(self._socks5_connect_and_save(iq, jingle_sid=sid))
+                    elif ibb_t is not None:
+                        t_sid = ibb_t.get('sid') or sid
+                        b_size = int(ibb_t.get('block-size', '8192'))
+                        use_msg = ibb_t.get('stanzas') == 'message'
+                        from slixmpp.plugins.xep_0047 import IBBytestream
+                        stream = IBBytestream(self.bot, t_sid, b_size, self.bot.boundjid, iq['from'], use_msg)
+                        asyncio.create_task(self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, t_sid, iq['from'], stream))
+                        self.bot.pending_files[t_sid] = file_info
+                        task = asyncio.create_task(self.upload_file_task(stream, file_info, iq['from'], sid))
+                        self.bot.pending_files[f"task_{sid}"] = task
             iq.reply().send()
         elif action == 'transport-accept':
             iq.reply().send()
@@ -659,8 +684,23 @@ class FileTransferPlugin(BasePlugin):
                         reply.send()
 
                     logging.info(f"S5B: SUCCESS connect to {host.get('host')}:{host.get('port')} for sid={sid}")
+
+                    if jingle_sid and host.get('type') == 'proxy' and file_info.get('mode') == 'send':
+                         logging.info(f"S5B: Activating proxy {host.get('jid')} for sid={sid}")
+                         try:
+                             act_iq = self.bot.make_iq_set(ito=host.get('jid'))
+                             query = ET.SubElement(act_iq.xml, '{http://jabber.org/protocol/bytestreams}query', sid=t_sid)
+                             ET.SubElement(query, 'activate').text = iq['from'].full
+                             await act_iq.send()
+                         except Exception as e:
+                             logging.error(f"S5B: Proxy activation failed: {e}")
+                             writer.close(); continue
+
                     file_info['downloading'] = True
-                    await self.download_file_task(reader, file_info, iq['from'], sid)
+                    if file_info.get('mode') == 'send':
+                        await self.upload_file_task(writer, file_info, iq['from'], sid)
+                    else:
+                        await self.download_file_task(reader, file_info, iq['from'], sid)
                     writer.close()
                     await writer.wait_closed()
                     return
@@ -780,6 +820,105 @@ class FileTransferPlugin(BasePlugin):
                 try:
                     if asyncio.iscoroutinefunction(reader.close): await reader.close()
                     else: reader.close()
+                except: pass
+            info = self.bot.pending_files.get(sid)
+            if info:
+                t_sid = info.get('transport_sid')
+                if t_sid and t_sid in self.bot.pending_files: del self.bot.pending_files[t_sid]
+            if sid in self.bot.pending_files: del self.bot.pending_files[sid]
+
+    async def initiate_jingle_transfer(self, peer_jid, path):
+        if not os.path.exists(path):
+            logging.error(f"JINGLE: File not found for upload: {path}")
+            return
+
+        fname = os.path.basename(path)
+        fsize = os.path.getsize(path)
+        sid = str(uuid.uuid4())
+
+        # Calculate SHA-1 hash for XEP-0300
+        loop = asyncio.get_event_loop()
+        h = hashlib.sha1()
+        with open(path, 'rb') as f:
+            while True:
+                chunk = await loop.run_in_executor(None, f.read, 1048576)
+                if not chunk: break
+                h.update(chunk)
+        fhash = h.hexdigest()
+
+        # Session metadata
+        transport_sid = sid
+        initiator = self.bot.boundjid.full
+        dst_addr = hashlib.sha1(f"{transport_sid}{initiator}{peer_jid.full}".encode()).hexdigest()
+
+        self.bot.pending_files[sid] = {
+            'name': fname, 'size': fsize, 'path': path,
+            'timestamp': loop.time(), 'peer_jid': peer_jid,
+            'ft_ns': 'urn:xmpp:jingle:apps:file-transfer:5',
+            'transport_sid': transport_sid, 's5b_connecting': False,
+            'mode': 'send', 'dst_addr': dst_addr, 'initiator': initiator,
+            'hash_algo': 'sha-1', 'hash_value': fhash
+        }
+
+        # Send session-initiate
+        iq = self.bot.make_iq_set(ito=peer_jid)
+        res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-initiate', 'sid': sid, 'initiator': initiator})
+        res_c = ET.SubElement(res_j, '{urn:xmpp:jingle:1}content', {'creator': 'initiator', 'name': 'file-transfer'})
+
+        # Description
+        res_d = ET.SubElement(res_c, '{urn:xmpp:jingle:apps:file-transfer:5}description')
+        res_f = ET.SubElement(res_d, '{urn:xmpp:jingle:apps:file-transfer:5}file')
+        ET.SubElement(res_f, '{urn:xmpp:jingle:apps:file-transfer:5}name').text = fname
+        ET.SubElement(res_f, '{urn:xmpp:jingle:apps:file-transfer:5}size').text = str(fsize)
+        h_el = ET.SubElement(res_f, '{urn:xmpp:hashes:2}hash', algo='sha-1')
+        h_el.text = fhash
+
+        # Transport (S5B + IBB)
+        res_t = ET.SubElement(res_c, '{urn:xmpp:jingle:transports:s5b:1}transport', {'sid': transport_sid, 'mode': 'tcp'})
+        s5_ip = SOCKS5_IP or self.get_local_ip()
+        ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate',
+                      host=s5_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full,
+                      cid='direct-host', priority='8253074', type='host')
+        for p_host, p_jid in [('proxy.eu.jabber.network', 'proxy.eu.jabber.network'), ('proxy.jabber.ru', 'proxy.jabber.ru')]:
+            ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=p_host, port='1080', jid=p_jid, cid=hashlib.md5(p_jid.encode()).hexdigest(), priority='65536', type='proxy')
+
+        # Fallback IBB option is usually provided in transport-replace, but we can stick to S5B first
+        iq.append(res_j)
+        await iq.send()
+
+    async def upload_file_task(self, writer, file_info, peer_jid, sid):
+        logging.info(f"UPLOAD START: sid={sid}, peer={peer_jid}, file={file_info['name']}")
+        path = file_info['path']
+        sent, loop = 0, asyncio.get_event_loop()
+        try:
+            with open(path, 'rb') as f:
+                while True:
+                    chunk = await loop.run_in_executor(None, f.read, 1048576)
+                    if not chunk:
+                        break
+
+                    if hasattr(writer, 'send_queue'):
+                        await writer.send_queue.put(chunk)
+                    else:
+                        writer.write(chunk)
+                        await writer.drain()
+
+                    sent += len(chunk)
+                    if sid in self.bot.pending_files:
+                        self.bot.pending_files[sid]['timestamp'] = loop.time()
+
+            # For IBB we need to close the stream to signal EOF if not already handled by Jingle
+            if hasattr(writer, 'send_queue'):
+                await writer.send_queue.put(None)
+
+            logging.info(f"UPLOAD COMPLETE: sid={sid}, sent {sent} bytes")
+        except Exception as e:
+            logging.error(f"UPLOAD ERROR: sid={sid}, error={e}")
+        finally:
+            if hasattr(writer, 'close'):
+                try:
+                    if asyncio.iscoroutinefunction(writer.close): await writer.close()
+                    else: writer.close()
                 except: pass
             info = self.bot.pending_files.get(sid)
             if info:
