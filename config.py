@@ -19,6 +19,10 @@ WHITELIST_FILE = os.getenv('WHITELIST_FILE', 'whitelist.json')
 MAX_DIR_DEPTH = int(os.getenv('MAX_DIR_DEPTH', 2))
 DOWNLOAD_DIR = os.getenv('DOWNLOAD_DIR')
 
+# SOCKS5 settings
+SOCKS5_PORT = int(os.getenv('SOCKS5_PORT', 1080))
+SOCKS5_IP = os.getenv('SOCKS5_IP')  # Public IP/domain for S5B candidates
+
 # XMPP account settings
 XMPP_JID = os.getenv('XMPP_JID')
 XMPP_RESOURCE = os.getenv('XMPP_RESOURCE')

@@ -7,7 +7,7 @@ import logging
 import aiohttp
 import base64  # ДОБАВЛЕНО ДЛЯ РАСПАКОВКИ IBB MESSAGE
 from slixmpp.xmlstream import ET, matcher, handler
-from config import ADMIN_JID, ADMIN_NOTIFY_LEVEL, QUOTA_LIMIT_BYTES
+from config import ADMIN_JID, ADMIN_NOTIFY_LEVEL, QUOTA_LIMIT_BYTES, SOCKS5_PORT, SOCKS5_IP
 from utils import get_dir_size, safe_quote, get_unique_path
 from .base import BasePlugin
 
@@ -66,6 +66,9 @@ class FileTransferPlugin(BasePlugin):
             handler.Callback('OOB', matcher.MatchXPath('{jabber:client}iq/{jabber:iq:oob}query'), self.handle_iq_oob)
         )
         self.bot.add_event_handler("ibb_stream_start", self.handle_ibb_stream)
+
+        # ДОБАВЛЕНО: Запускаем собственный SOCKS5 сервер
+        asyncio.create_task(asyncio.start_server(self._handle_socks5_client, '0.0.0.0', SOCKS5_PORT))
         
         # ДОБАВЛЕНО: Регистрируем перехватчик входящего XML для IBB <message>
         self.bot.add_filter('in', self._intercept_ibb_messages)
@@ -159,6 +162,52 @@ class FileTransferPlugin(BasePlugin):
             elif xml.tag.endswith('}message') and xml.get('type') == 'error':
                 stanza_id = xml.get('id')
                 if stanza_id: self._tracked_ft_ids.discard(stanza_id)
+
+    async def _handle_socks5_client(self, reader, writer):
+        try:
+            # 1. NO AUTH Handshake
+            if await reader.readexactly(2) != b"\x05\x01":
+                writer.close(); return
+            if await reader.readexactly(1) != b"\x00":
+                writer.close(); return
+            writer.write(b"\x05\x00"); await writer.drain()
+
+            # 2. CONNECT Request
+            req = await reader.readexactly(4)
+            if req != b"\x05\x01\x00\x03":
+                writer.close(); return
+            addr_len = (await reader.readexactly(1))[0]
+            dst_addr = (await reader.readexactly(addr_len)).decode()
+            port = await reader.readexactly(2)
+
+            # 3. Match dst_addr to pending transfer
+            match_found = False
+            for sid, info in list(self.bot.pending_files.items()):
+                if isinstance(info, dict):
+                    t_sid = info.get('transport_sid', sid)
+                    peer_full = info['peer_jid'].full
+                    # Target is us, Initiator is peer
+                    expected = hashlib.sha1(f"{t_sid}{peer_full}{self.bot.boundjid.full}".encode()).hexdigest()
+                    if dst_addr == expected:
+                        if info.get('downloading'):
+                            writer.write(b"\x05\x01\x00\x03" + bytes([len(dst_addr)]) + dst_addr.encode() + port)
+                            await writer.drain(); writer.close(); return
+
+                        info['downloading'] = True
+                        writer.write(b"\x05\x00\x00\x03" + bytes([len(dst_addr)]) + dst_addr.encode() + port)
+                        await writer.drain()
+                        logging.info(f"SOCKS5: Recognized incoming connection for sid={sid}, dst_addr={dst_addr}")
+                        await self.download_file_task(reader, info, info['peer_jid'], sid)
+                        match_found = True
+                        break
+
+            if not match_found:
+                writer.write(b"\x05\x01\x00\x03" + bytes([len(dst_addr)]) + dst_addr.encode() + port)
+                await writer.drain()
+        except Exception as e:
+            logging.error(f"SOCKS5 server error: {e}")
+        finally:
+            writer.close()
 
     async def request_bob_data(self, to_jid, cid_uri, fname):
         cid = cid_uri.replace('cid:', '')
@@ -304,7 +353,7 @@ class FileTransferPlugin(BasePlugin):
                 'content_name': content.get('name'), 'content_creator': content.get('creator'),
                 'ft_ns': ft_ns, 'transport_sid': transport_sid, 's5b_connecting': False,
                 'ibb_stanzas': ibb_t.get('stanzas') if ibb_t is not None else None,
-                'session_sid': sid
+                'session_sid': sid, 'downloading': False
             }
             if transport_sid != sid: self.bot.pending_files[transport_sid] = self.bot.pending_files[sid]
             iq.reply().send()
@@ -325,11 +374,11 @@ class FileTransferPlugin(BasePlugin):
                 if s5b_t is not None:
                     res_t = ET.SubElement(res_c, '{urn:xmpp:jingle:transports:s5b:1}transport', {'sid': transport_sid, 'mode': 'tcp'})
 
-                    # Direct candidate
+                    # Direct host candidates
                     local_ip = self.get_local_ip()
-                    ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate',
-                                  host=local_ip, port='1080', jid=self.bot.boundjid.full,
-                                  cid='direct-host', priority='8253074', type='host')
+                    ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=local_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-local', priority='8253074', type='host')
+                    if SOCKS5_IP and SOCKS5_IP != local_ip:
+                        ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=SOCKS5_IP, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-public', priority='8252818', type='host')
 
                     # Proxy candidates
                     for p_host, p_jid in [('proxy.eu.jabber.network', 'proxy.eu.jabber.network'), ('proxy.jabber.ru', 'proxy.jabber.ru')]:
@@ -449,7 +498,7 @@ class FileTransferPlugin(BasePlugin):
             self.bot.pending_files[sid] = {
                 'name': fname, 'size': fsize, 'timestamp': asyncio.get_event_loop().time(),
                 'ibb_allowed': 'http://jabber.org/protocol/ibb' in offered_methods,
-                'peer_jid': iq['from'], 'transport_sid': sid
+                'peer_jid': iq['from'], 'transport_sid': sid, 'downloading': False
             }
             reply = iq.reply()
             res_si = ET.Element('{http://jabber.org/protocol/si}si', {'id': sid})
@@ -494,6 +543,14 @@ class FileTransferPlugin(BasePlugin):
                 if not hosts and used is None:
                     reply = iq.reply()
                     res_q = ET.Element('{http://jabber.org/protocol/bytestreams}query', {'sid': sid})
+
+                    # Direct host candidates
+                    local_ip = self.get_local_ip()
+                    ET.SubElement(res_q, 'streamhost', host=local_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full)
+                    if SOCKS5_IP and SOCKS5_IP != local_ip:
+                         ET.SubElement(res_q, 'streamhost', host=SOCKS5_IP, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full)
+
+                    # Proxy candidates
                     for p_jid, p_info in self.KNOWN_PROXIES.items():
                         ET.SubElement(res_q, 'streamhost', host=p_info['host'], port=str(p_info['port']), jid=p_jid)
                     reply.append(res_q)
@@ -538,6 +595,7 @@ class FileTransferPlugin(BasePlugin):
                             reply.append(res_q)
                         reply.send()
                     logging.info(f"S5B: SUCCESS connect to {host.get('host')}:{host.get('port')} for sid={sid}")
+                    file_info['downloading'] = True
                     await self.download_file_task(reader, file_info, iq['from'], sid)
                     writer.close()
                     await writer.wait_closed()
