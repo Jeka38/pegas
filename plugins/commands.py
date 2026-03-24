@@ -1,6 +1,8 @@
 import os
 import shutil
 import datetime
+import re
+import asyncio
 from config import ADMIN_JID, QUOTA_LIMIT_BYTES, MAX_DIR_DEPTH
 from utils import (
     get_dir_size, format_size, get_safe_path, get_all_items,
@@ -17,28 +19,49 @@ class CommandsPlugin(BasePlugin):
         if msg['type'] not in ('chat', 'normal'):
             return
 
+        if not self.bot.is_allowed(msg['from']):
+            # Только если в сообщении что-то есть (текст или OOB), уведомляем об отказе
+            if msg['body'] or msg.xml.find('{jabber:x:oob}x') is not None:
+                self.reply(msg, f"⚠️ Доступ запрещён. Пожалуйста, обратитесь к администратору для получения доступа: {ADMIN_JID}")
+            return
+
+        user_dir, user_hash = self.bot.get_user_info(msg['from'])
+        cmd_executed = False
+        oob_urls = set()
+
         # Handle XEP-0066 Out-of-Band Data in messages
         oob = msg.xml.find('{jabber:x:oob}x')
         if oob is not None:
-            url = oob.find('{jabber:x:oob}url')
-            if url is not None and url.text:
+            url_el = oob.find('{jabber:x:oob}url')
+            if url_el is not None and url_el.text:
+                url = url_el.text.strip()
+                cmd_executed = True
+                oob_urls.add(url)
                 desc = oob.find('{jabber:x:oob}desc')
-                fname = desc.text if desc is not None and desc.text else os.path.basename(url.text)
-                import asyncio
-                asyncio.create_task(self.bot.file_transfer.download_from_url(url.text, fname, msg['from']))
-                return
+                fname = desc.text if desc is not None and desc.text else os.path.basename(url)
+                asyncio.create_task(self.bot.file_transfer.download_from_url(url, fname, msg['from']))
 
         if not msg['body']:
             return
-        if not self.bot.is_allowed(msg['from']):
-            self.reply(msg, f"⚠️ Доступ запрещён. Пожалуйста, обратитесь к администратору для получения доступа: {ADMIN_JID}")
-            return
+
+        # Detect URLs in message body, avoiding duplicates from OOB and filtering trailing punctuation
+        url_regex = r'https?://(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}(?::\d+)?(?:/[^\s<>"]*)?'
+        raw_urls = re.findall(url_regex, msg['body'])
+        clean_urls = []
+        for u in raw_urls:
+            # Remove trailing punctuation (.,!?;:)
+            u = u.rstrip('.,!?;:')
+            if u not in oob_urls and u not in clean_urls:
+                clean_urls.append(u)
+
+        if clean_urls:
+            cmd_executed = True
+            for url in clean_urls[:5]: # Limit 5 links at once
+                asyncio.create_task(self.bot.file_transfer.download_from_url(url, os.path.basename(url), msg['from']))
 
         parts = msg['body'].strip().split()
         if not parts: return
         cmd = parts[0].lower()
-        user_dir, user_hash = self.bot.get_user_info(msg['from'])
-        cmd_executed = False
 
         # User commands
         if cmd in ('help', '?') and len(parts) == 1:
