@@ -46,7 +46,7 @@ class OBBFastBot(ClientXMPP):
         # Setup custom Ping handler
         from slixmpp.xmlstream import matcher, handler
         self.register_handler(
-            handler.Callback('Ping', matcher.MatchXPath('{jabber:client}iq/{urn:xmpp:ping}ping'), self.handle_ping)
+            handler.Callback('Ping', matcher.MatchXPath('iq/{urn:xmpp:ping}ping'), self.handle_ping)
         )
 
         # Load logical modules (plugins)
@@ -56,6 +56,7 @@ class OBBFastBot(ClientXMPP):
 
 
     def handle_ping(self, iq):
+        if iq['type'] in ('error', 'result'): return
         logging.info(f"PING RECV from {iq['from']}")
         reply = iq.reply()
         reply.append(ET.Element('{urn:xmpp:ping}ping'))
@@ -71,7 +72,7 @@ class OBBFastBot(ClientXMPP):
                 await asyncio.sleep(60)
                 now = asyncio.get_event_loop().time()
                 to_delete = []
-                for sid, info in self.pending_files.items():
+                for sid, info in list(self.pending_files.items()):
                     if isinstance(info, dict):
                         # Timeout for inactive transfers (1 minute)
                         if now - info.get('timestamp', now) > 60:
