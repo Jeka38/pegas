@@ -343,7 +343,9 @@ class FileTransferPlugin(BasePlugin):
                 if not self.bot.is_allowed(iq['from']):
                     logging.warning(f"JINGLE access denied for {iq['from']}")
                     self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Доступ запрещён. Пожалуйста, обратитесь к администратору для получения доступа: {ADMIN_JID}", mtype='chat')
-                    iq.error('not-allowed').send()
+                    reply = iq.error()
+                    reply['error']['condition'] = 'not-allowed'
+                    reply.send()
                     return
                 content = jingle.find('{urn:xmpp:jingle:1}content')
                 if content is None: return iq.reply().send()
@@ -362,19 +364,25 @@ class FileTransferPlugin(BasePlugin):
                 from utils import is_php_file
                 if is_php_file(fname):
                     self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Ошибка: Загрузка PHP-файлов запрещена ({fname})", mtype='chat')
-                    iq.error('not-acceptable').send()
+                    reply = iq.error()
+                    reply['error']['condition'] = 'not-acceptable'
+                    reply.send()
                     return
                 try: fsize = int(size_tag.text or 0)
                 except: fsize = 0
                 user_dir, _ = self.bot.get_user_info(iq['from'])
                 if get_dir_size(user_dir) + fsize > QUOTA_LIMIT_BYTES:
-                    iq.error('not-acceptable').send()
+                    reply = iq.error()
+                    reply['error']['condition'] = 'not-acceptable'
+                    reply.send()
                     return
 
                 s5b_t = content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
                 if s5b_t is None or not s5b_t.get('sid'):
                     logging.warning(f"JINGLE: Ignoring session-initiate without S5B transport from {iq['from']}")
-                    iq.error('feature-not-implemented').send()
+                    reply = iq.error()
+                    reply['error']['condition'] = 'feature-not-implemented'
+                    reply.send()
                     return
 
                 transport_sid = s5b_t.get('sid')
@@ -453,7 +461,10 @@ class FileTransferPlugin(BasePlugin):
                 iq.reply().send()
         except Exception as e:
             logging.error(f"JINGLE IQ ERROR: {e}")
-            try: iq.error('internal-server-error').send()
+            try:
+                reply = iq.error()
+                reply['error']['condition'] = 'internal-server-error'
+                reply.send()
             except: pass
 
     def handle_raw_si(self, iq):
@@ -461,7 +472,9 @@ class FileTransferPlugin(BasePlugin):
         if not self.bot.is_allowed(iq['from']):
             logging.warning(f"SI access denied for {iq['from']}")
             self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Доступ запрещён. Пожалуйста, обратитесь к администратору для получения доступа: {ADMIN_JID}", mtype='chat')
-            iq.error('not-allowed').send()
+            reply = iq.error()
+            reply['error']['condition'] = 'not-allowed'
+            reply.send()
             return
         try:
             si = iq.xml.find('{http://jabber.org/protocol/si}si')
@@ -471,11 +484,15 @@ class FileTransferPlugin(BasePlugin):
             from utils import is_php_file
             if is_php_file(fname):
                 self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Ошибка: Загрузка PHP-файлов запрещена ({fname})", mtype='chat')
-                iq.error('not-acceptable').send()
+                reply = iq.error()
+                reply['error']['condition'] = 'not-acceptable'
+                reply.send()
                 return
             user_dir, _ = self.bot.get_user_info(iq['from'])
             if get_dir_size(user_dir) + fsize > QUOTA_LIMIT_BYTES:
-                iq.error('not-acceptable').send()
+                reply = iq.error()
+                reply['error']['condition'] = 'not-acceptable'
+                reply.send()
                 return
             feature_neg = si.find('{http://jabber.org/protocol/feature-neg}feature')
             offered_methods = []
@@ -488,7 +505,9 @@ class FileTransferPlugin(BasePlugin):
                         offered_methods.extend([v.text for v in field.findall('{jabber:x:data}option/{jabber:x:data}value')])
             chosen_method = next((m for m in ['jabber:iq:oob', 'http://jabber.org/protocol/bytestreams', 'http://jabber.org/protocol/ibb'] if m in offered_methods), None)
             if not chosen_method:
-                iq.error('bad-request').send()
+                reply = iq.error()
+                reply['error']['condition'] = 'bad-request'
+                reply.send()
                 return
             self.bot.pending_files[sid] = {
                 'name': fname, 'size': fsize, 'timestamp': asyncio.get_event_loop().time(),
@@ -505,7 +524,10 @@ class FileTransferPlugin(BasePlugin):
             reply.send()
         except Exception as e:
             logging.error(f"SI ERROR: {e}")
-            try: iq.error('internal-server-error').send()
+            try:
+                reply = iq.error()
+                reply['error']['condition'] = 'internal-server-error'
+                reply.send()
             except: pass
 
     def handle_raw_s5b(self, iq):
@@ -540,7 +562,9 @@ class FileTransferPlugin(BasePlugin):
                     if proxy:
                         hosts = [ET.Element('streamhost', host=proxy['host'], port=str(proxy['port']), jid=jid)]
                     else:
-                        iq.error('item-not-found').send()
+                        reply = iq.error()
+                        reply['error']['condition'] = 'item-not-found'
+                        reply.send()
                         return
                 else:
                     hosts = query.findall('{http://jabber.org/protocol/bytestreams}streamhost')
@@ -628,7 +652,9 @@ class FileTransferPlugin(BasePlugin):
                     logging.info(f"S5B: Failed connect to {host.get('host')} for sid={sid}: {e}")
                     continue
             if not jingle_sid:
-                iq.error('service-unavailable').send()
+                reply = iq.error()
+                reply['error']['condition'] = 'service-unavailable'
+                reply.send()
             else:
                 logging.info(f"SOCKS5 failed for Jingle sid={sid}, no IBB fallback allowed.")
                 if sid in self.bot.pending_files:
