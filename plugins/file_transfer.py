@@ -408,7 +408,9 @@ class FileTransferPlugin(BasePlugin):
                     'content_name': content.get('name'), 'content_creator': content.get('creator'),
                     'ft_ns': ft_ns, 'transport_sid': transport_sid, 's5b_connecting': False,
                     'ibb_stanzas': ibb_t.get('stanzas') if ibb_t is not None else None,
-                    'session_sid': sid, 'downloading': False
+                    'session_sid': sid, 'downloading': False,
+                    'local_candidates': {},
+                    's5b_activated': asyncio.Event()
                 }
                 if transport_sid != sid: self.bot.pending_files[transport_sid] = self.bot.pending_files[sid]
                 iq.reply().send()
@@ -435,7 +437,9 @@ class FileTransferPlugin(BasePlugin):
                         if SOCKS5_IP and SOCKS5_IP != local_ip:
                             ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=SOCKS5_IP, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-public', priority='8252818', type='host')
                         for p_host, p_jid in [('proxy.eu.jabber.network', 'proxy.eu.jabber.network'), ('proxy.jabber.ru', 'proxy.jabber.ru')]:
-                            ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=p_host, port='1080', jid=p_jid, cid=hashlib.md5(p_jid.encode()).hexdigest(), priority='65536', type='proxy')
+                            cid = hashlib.md5(p_jid.encode()).hexdigest()
+                            ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=p_host, port='1080', jid=p_jid, cid=cid, priority='65536', type='proxy')
+                            self.bot.pending_files[sid]['local_candidates'][cid] = p_jid
                     elif ibb_t is not None:
                         b_size = int(ibb_t.get('block-size', '32768'))
                         use_msg = ibb_t.get('stanzas') == 'message' or True
@@ -463,9 +467,36 @@ class FileTransferPlugin(BasePlugin):
                 content = jingle.find('{urn:xmpp:jingle:1}content')
                 if content is not None:
                     transport = content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
-                    if transport is not None and not self.bot.pending_files.get(sid, {}).get('s5b_connecting'):
-                        self.bot.pending_files[sid]['s5b_connecting'] = True
-                        self.bot.pending_files[f"jingle_s5b_info_{sid}"] = asyncio.create_task(self._socks5_connect_and_save(iq, jingle_sid=sid))
+                    if transport is not None:
+                        file_info = self.bot.pending_files.get(sid)
+                        if file_info:
+                            used = transport.find('{urn:xmpp:jingle:transports:s5b:1}candidate-used')
+                            activated = transport.find('{urn:xmpp:jingle:transports:s5b:1}candidate-activated')
+                            if used is not None:
+                                cid = used.get('cid')
+                                proxy_jid = file_info.get('local_candidates', {}).get(cid)
+                                if proxy_jid:
+                                    logging.info(f"S5B: Peer used our proxy candidate {cid} ({proxy_jid}). Activating...")
+                                    act_iq = self.bot.make_iq_set(ito=proxy_jid)
+                                    query = ET.SubElement(act_iq.xml, '{http://jabber.org/protocol/bytestreams}query', sid=file_info.get('transport_sid', sid))
+                                    ET.SubElement(query, '{http://jabber.org/protocol/bytestreams}activate').text = iq['from'].full
+                                    act_iq.send()
+
+                                    info_iq = self.bot.make_iq_set(ito=iq['from'])
+                                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'transport-info', 'sid': sid, 'initiator': iq['from'].full})
+                                    res_c = ET.SubElement(res_j, '{urn:xmpp:jingle:1}content', {'creator': file_info.get('content_creator'), 'name': file_info.get('content_name')})
+                                    res_t = ET.SubElement(res_c, '{urn:xmpp:jingle:transports:s5b:1}transport', {'sid': file_info.get('transport_sid', sid)})
+                                    ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate-activated', cid=cid)
+                                    info_iq.append(res_j); info_iq.send()
+
+                            if activated is not None:
+                                logging.info(f"S5B: Proxy candidate activated by peer: {activated.get('cid')}")
+                                if 's5b_activated' in file_info:
+                                    file_info['s5b_activated'].set()
+
+                        if not self.bot.pending_files.get(sid, {}).get('s5b_connecting'):
+                            self.bot.pending_files[sid]['s5b_connecting'] = True
+                            self.bot.pending_files[f"jingle_s5b_info_{sid}"] = asyncio.create_task(self._socks5_connect_and_save(iq, jingle_sid=sid))
                 iq.reply().send()
             elif action == 'transport-replace':
                 content = jingle.find('{urn:xmpp:jingle:1}content')
@@ -600,6 +631,8 @@ class FileTransferPlugin(BasePlugin):
 
             file_info = self.bot.pending_files.get(sid)
             if not file_info: return
+            if file_info.get('downloading'): return
+
             t_sid = file_info.get('transport_sid', sid)
             dst_addr = hashlib.sha1(f"{t_sid}{peer_full}{self.bot.boundjid.full}".encode()).hexdigest()
 
@@ -637,6 +670,15 @@ class FileTransferPlugin(BasePlugin):
                             reply.append(res_q)
                         reply.send()
                     logging.info(f"S5B: SUCCESS connect to {host.get('host')}:{host.get('port')} for sid={sid}")
+                    if host.get('type') == 'proxy':
+                        logging.info(f"S5B: Connected to proxy for sid={sid}, waiting for activation...")
+                        try:
+                            await asyncio.wait_for(file_info['s5b_activated'].wait(), timeout=15)
+                            logging.info(f"S5B: Proxy activated for sid={sid}")
+                        except asyncio.TimeoutError:
+                            logging.warning(f"S5B: Proxy activation timeout for sid={sid}")
+                            writer.close(); await writer.wait_closed(); continue
+
                     file_info['downloading'] = True
                     await self.download_file_task(reader, file_info, iq['from'], sid)
                     writer.close(); await writer.wait_closed(); return
@@ -662,6 +704,13 @@ class FileTransferPlugin(BasePlugin):
                 self.bot.event('ibb_stream_start', stream)
                 reply.append(res_j); reply.send()
             else:
+                if jingle_sid:
+                    logging.info(f"SOCKS5 failed for Jingle sid={sid}, no IBB fallback allowed. Terminating.")
+                    term_iq = self.bot.make_iq_set(ito=iq['from'])
+                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-terminate', 'sid': sid, 'initiator': iq['from'].full})
+                    reason = ET.SubElement(res_j, '{urn:xmpp:jingle:1}reason')
+                    ET.SubElement(reason, '{urn:xmpp:jingle:1}connectivity-error')
+                    term_iq.append(res_j); term_iq.send()
                 if sid in self.bot.pending_files: del self.bot.pending_files[sid]
         except Exception as e: logging.error(f"SOCKS5 ERROR: {e}")
 
