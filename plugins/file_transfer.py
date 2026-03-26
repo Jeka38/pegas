@@ -62,7 +62,8 @@ class FileTransferPlugin(BasePlugin):
             handler.Callback('S5B', matcher.MatchXPath('{jabber:client}iq/{http://jabber.org/protocol/bytestreams}query'), self.handle_raw_s5b)
         )
         self.bot.register_handler(
-            handler.Callback('Jingle', matcher.MatchXPath('{jabber:client}iq/{urn:xmpp:jingle:1}jingle'), self.handle_jingle)
+            handler.Callback('Jingle', matcher.MatchXPath('{jabber:client}iq/{urn:xmpp:jingle:1}jingle'),
+                             lambda iq: asyncio.create_task(self.handle_jingle(iq)))
         )
         self.bot.register_handler(
             handler.Callback('OOB', matcher.MatchXPath('{jabber:client}iq/{jabber:iq:oob}query'), self.handle_iq_oob)
@@ -383,19 +384,21 @@ class FileTransferPlugin(BasePlugin):
 
                 s5b_t = content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
                 if s5b_t is None:
-                    # We only support S5B now. Acknowledge IQ, then terminate session with reason.
-                    iq.reply().send()
-                    self._terminate_jingle(iq['from'], sid, 'unsupported-transports', "Only SOCKS5 Bytestreams (S5B) are supported")
+                    # We only support S5B now. Reject via IQ error.
+                    self._send_iq_error(iq, 'feature-not-implemented')
                     self.bot.send_message(mto=iq['from'], mbody="⚠️ Ошибка: Бот поддерживает только передачу файлов через SOCKS5 (S5B). IBB не поддерживается.", mtype='chat')
                     return
 
                 if s5b_t.get('sid'): transport_sid = s5b_t.get('sid')
                 else: transport_sid = sid
 
+                content_name = content.get('name')
+                content_creator = content.get('creator')
+
                 self.bot.pending_files[sid] = {
                     'name': fname, 'size': fsize, 'timestamp': asyncio.get_event_loop().time(),
                     'peer_jid': iq['from'], 'ibb_allowed': False,
-                    'content_name': content.get('name'), 'content_creator': content.get('creator'),
+                    'content_name': content_name, 'content_creator': content_creator,
                     'ft_ns': ft_ns, 'transport_sid': transport_sid, 's5b_connecting': False,
                     'session_sid': sid, 'downloading': False,
                     'local_candidates': {},
@@ -412,12 +415,18 @@ class FileTransferPlugin(BasePlugin):
 
                 try:
                     accept_iq = self.bot.make_iq_set(ito=iq['from'])
-                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-accept', 'sid': sid, 'initiator': iq['from'].full})
-                    res_c = ET.SubElement(res_j, '{urn:xmpp:jingle:1}content', {'creator': content.get('creator'), 'name': content.get('name')})
-                    res_d = ET.SubElement(res_c, f'{{{ft_ns}}}description')
-                    res_f = ET.SubElement(res_d, f'{{{ft_ns}}}file')
-                    ET.SubElement(res_f, f'{{{ft_ns}}}name').text = fname
-                    ET.SubElement(res_f, f'{{{ft_ns}}}size').text = str(fsize)
+                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {
+                        'action': 'session-accept',
+                        'sid': sid,
+                        'initiator': iq['from'].full,
+                        'responder': self.bot.boundjid.full
+                    })
+                    res_c = ET.SubElement(res_j, '{urn:xmpp:jingle:1}content', {
+                        'creator': content_creator,
+                        'name': content_name
+                    })
+                    # XEP-0234: SHOULD NOT include <file/> if it's the same
+                    ET.SubElement(res_c, f'{{{ft_ns}}}description')
 
                     if s5b_t is not None:
                         res_t = ET.SubElement(res_c, '{urn:xmpp:jingle:transports:s5b:1}transport', {'sid': transport_sid, 'mode': 'tcp'})
@@ -480,10 +489,8 @@ class FileTransferPlugin(BasePlugin):
                             self.bot.pending_files[f"jingle_s5b_info_{sid}"] = asyncio.create_task(self._socks5_connect_and_save(iq, jingle_sid=sid))
                 iq.reply().send()
             elif action == 'transport-replace':
-                # Not supporting transport-replace (especially for IBB).
-                # Acknowledge IQ, then terminate or reject. Terminate is simpler for "S5B only" policy.
-                iq.reply().send()
-                self._terminate_jingle(iq['from'], sid, 'unsupported-transports', "Transport replacement not supported")
+                # Not supporting transport-replace (especially for IBB). Reject via IQ error.
+                self._send_iq_error(iq, 'feature-not-implemented')
             elif action == 'transport-accept':
                 iq.reply().send()
             elif action == 'session-terminate':
@@ -693,7 +700,10 @@ class FileTransferPlugin(BasePlugin):
                     logging.info(f"JINGLE COMPLETE: Sending session-info (received) and session-terminate (success) for sid={session_sid}")
                     info_iq = self.bot.make_iq_set(ito=peer_jid)
                     res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-info', 'sid': session_sid, 'initiator': peer_jid.full})
-                    ET.SubElement(res_j, f'{{{ft_ns}}}received')
+                    ET.SubElement(res_j, f'{{{ft_ns}}}received', {
+                        'creator': file_info.get('content_creator', 'initiator'),
+                        'name': file_info.get('content_name', 'file')
+                    })
                     info_iq.append(res_j); info_iq.send()
                     self._terminate_jingle(peer_jid, session_sid, 'success')
             else:
