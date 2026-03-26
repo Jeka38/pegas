@@ -1,0 +1,38 @@
+{
+  "name": "app",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "test": "tests"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Jeka38/pegas.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/Jeka38/pegas/issues"
+  },
+  "homepage": "https://github.com/Jeka38/pegas#readme",
+  "dependencies": {
+    "@xmpp/client": "^0.14.0",
+    "@xmpp/debug": "^0.14.0",
+    "@xmpp/id": "^0.14.0",
+    "@xmpp/xml": "^0.14.0",
+    "axios": "^1.13.6",
+    "better-sqlite3": "^12.8.0",
+    "date-fns": "^4.1.0",
+    "dotenv": "^17.3.1",
+    "fs-extra": "^11.3.4",
+    "ip": "^2.0.1",
+    "ltx": "^3.1.2",
+    "minimatch": "^10.2.4"
+  }
+}
