@@ -332,7 +332,17 @@ class FileTransferPlugin(BasePlugin):
         reply['error']['condition'] = condition
         reply.send()
 
-    def handle_jingle(self, iq):
+    def _terminate_jingle(self, peer_jid, sid, reason, text=None):
+        term_iq = self.bot.make_iq_set(ito=peer_jid)
+        res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-terminate', 'sid': sid, 'initiator': peer_jid.full})
+        reason_el = ET.SubElement(res_j, '{urn:xmpp:jingle:1}reason')
+        ET.SubElement(reason_el, f'{{urn:xmpp:jingle:1}}{reason}')
+        if text:
+            ET.SubElement(reason_el, '{urn:xmpp:jingle:1}text').text = text
+        term_iq.append(res_j)
+        term_iq.send()
+
+    async def handle_jingle(self, iq):
         try:
             if iq['type'] in ('error', 'result'): return
             jingle = iq.xml.find('{urn:xmpp:jingle:1}jingle')
@@ -373,8 +383,10 @@ class FileTransferPlugin(BasePlugin):
 
                 s5b_t = content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
                 if s5b_t is None:
-                    # We only support S5B now
-                    self._send_iq_error(iq, 'feature-not-implemented')
+                    # We only support S5B now. Acknowledge IQ, then terminate session with reason.
+                    iq.reply().send()
+                    self._terminate_jingle(iq['from'], sid, 'unsupported-transports', "Only SOCKS5 Bytestreams (S5B) are supported")
+                    self.bot.send_message(mto=iq['from'], mbody="⚠️ Ошибка: Бот поддерживает только передачу файлов через SOCKS5 (S5B). IBB не поддерживается.", mtype='chat')
                     return
 
                 if s5b_t.get('sid'): transport_sid = s5b_t.get('sid')
@@ -444,7 +456,12 @@ class FileTransferPlugin(BasePlugin):
                                     act_iq = self.bot.make_iq_set(ito=proxy_jid)
                                     query = ET.SubElement(act_iq.xml, '{http://jabber.org/protocol/bytestreams}query', sid=file_info.get('transport_sid', sid))
                                     ET.SubElement(query, '{http://jabber.org/protocol/bytestreams}activate').text = iq['from'].full
-                                    act_iq.send()
+                                    try:
+                                        await act_iq.send()
+                                        logging.info(f"S5B: Proxy {proxy_jid} activated successfully")
+                                    except Exception as e:
+                                        logging.error(f"S5B: Failed to activate proxy {proxy_jid}: {e}")
+                                        # Proceeding anyway, maybe it works
 
                                     info_iq = self.bot.make_iq_set(ito=iq['from'])
                                     res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'transport-info', 'sid': sid, 'initiator': iq['from'].full})
@@ -463,8 +480,10 @@ class FileTransferPlugin(BasePlugin):
                             self.bot.pending_files[f"jingle_s5b_info_{sid}"] = asyncio.create_task(self._socks5_connect_and_save(iq, jingle_sid=sid))
                 iq.reply().send()
             elif action == 'transport-replace':
-                # Not supporting transport-replace (especially for IBB)
-                self._send_iq_error(iq, 'feature-not-implemented')
+                # Not supporting transport-replace (especially for IBB).
+                # Acknowledge IQ, then terminate or reject. Terminate is simpler for "S5B only" policy.
+                iq.reply().send()
+                self._terminate_jingle(iq['from'], sid, 'unsupported-transports', "Transport replacement not supported")
             elif action == 'transport-accept':
                 iq.reply().send()
             elif action == 'session-terminate':
@@ -616,7 +635,7 @@ class FileTransferPlugin(BasePlugin):
                             reply.append(res_q)
                         reply.send()
                     logging.info(f"S5B: SUCCESS connect to {host.get('host')}:{host.get('port')} for sid={sid}")
-                    if host.get('type') == 'proxy':
+                    if jingle_sid and host.get('type') == 'proxy':
                         logging.info(f"S5B: Connected to proxy for sid={sid}, waiting for activation...")
                         try:
                             # Safety check for Event existence
@@ -640,11 +659,7 @@ class FileTransferPlugin(BasePlugin):
             else:
                 if jingle_sid:
                     logging.info(f"SOCKS5 failed for Jingle sid={sid}, no IBB fallback allowed. Terminating.")
-                    term_iq = self.bot.make_iq_set(ito=iq['from'])
-                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-terminate', 'sid': sid, 'initiator': iq['from'].full})
-                    reason = ET.SubElement(res_j, '{urn:xmpp:jingle:1}reason')
-                    ET.SubElement(reason, '{urn:xmpp:jingle:1}connectivity-error')
-                    term_iq.append(res_j); term_iq.send()
+                    self._terminate_jingle(iq['from'], sid, 'connectivity-error')
                 if sid in self.bot.pending_files: del self.bot.pending_files[sid]
         except Exception as e: logging.error(f"SOCKS5 ERROR: {e}")
 
@@ -680,11 +695,7 @@ class FileTransferPlugin(BasePlugin):
                     res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-info', 'sid': session_sid, 'initiator': peer_jid.full})
                     ET.SubElement(res_j, f'{{{ft_ns}}}received')
                     info_iq.append(res_j); info_iq.send()
-                    term_iq = self.bot.make_iq_set(ito=peer_jid)
-                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-terminate', 'sid': session_sid, 'initiator': peer_jid.full})
-                    reason = ET.SubElement(res_j, '{urn:xmpp:jingle:1}reason')
-                    ET.SubElement(reason, '{urn:xmpp:jingle:1}success')
-                    term_iq.append(res_j); term_iq.send()
+                    self._terminate_jingle(peer_jid, session_sid, 'success')
             else:
                 logging.error(f"DOWNLOAD INCOMPLETE: sid={sid}, received {received}/{file_info['size']}")
                 self.bot.send_message(mto=peer_jid, mbody="⚠️ Ошибка: Файл получен не полностью. Пожалуйста, попробуйте отправить снова.", mtype='chat')
