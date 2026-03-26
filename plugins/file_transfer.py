@@ -34,7 +34,6 @@ class FileTransferPlugin(BasePlugin):
         'http://jabber.org/protocol/si',
         'http://jabber.org/protocol/si/profile/file-transfer',
         'http://jabber.org/protocol/bytestreams',
-        'http://jabber.org/protocol/ibb',
         'urn:xmpp:jingle:1',
         'urn:xmpp:jingle:apps:file-transfer:1',
         'urn:xmpp:jingle:apps:file-transfer:2',
@@ -42,7 +41,6 @@ class FileTransferPlugin(BasePlugin):
         'urn:xmpp:jingle:apps:file-transfer:4',
         'urn:xmpp:jingle:apps:file-transfer:5',
         'urn:xmpp:jingle:transports:s5b:1',
-        'urn:xmpp:jingle:transports:ibb:1',
         'jabber:iq:oob',
         'jabber:x:oob',
         'urn:xmpp:bob',
@@ -70,42 +68,12 @@ class FileTransferPlugin(BasePlugin):
             handler.Callback('OOB', matcher.MatchXPath('{jabber:client}iq/{jabber:iq:oob}query'), self.handle_iq_oob)
         )
 
-        self.bot.add_event_handler("ibb_stream_start", self.handle_ibb_stream)
-
         # Запускаем собственный SOCKS5 сервер
         asyncio.create_task(asyncio.start_server(self._handle_socks5_client, '0.0.0.0', SOCKS5_PORT))
-        
-        # Перехватчик входящего XML для IBB <message>
-        self.bot.add_filter('in', self._intercept_ibb_messages)
 
         # Регистрация фич в Service Discovery (XEP-0030)
         for ns in self.FT_NAMESPACES:
             self.bot['xep_0030'].add_feature(ns)
-
-    def _intercept_ibb_messages(self, stanza):
-        try:
-            if hasattr(stanza, 'xml') and stanza.xml.tag.endswith('message'):
-                data_el = stanza.xml.find('{http://jabber.org/protocol/ibb}data')
-                close_el = stanza.xml.find('{http://jabber.org/protocol/ibb}close')
-                if data_el is not None:
-                    sid = data_el.get('sid')
-                    file_info = self.bot.pending_files.get(sid)
-                    if file_info and 'stream' in file_info:
-                        file_info['timestamp'] = asyncio.get_event_loop().time()
-                        if data_el.text:
-                            chunk = base64.b64decode(data_el.text)
-                            file_info['stream'].recv_queue.put_nowait(chunk)
-                        return None
-                elif close_el is not None:
-                    sid = close_el.get('sid')
-                    file_info = self.bot.pending_files.get(sid)
-                    if file_info and 'stream' in file_info:
-                        file_info['timestamp'] = asyncio.get_event_loop().time()
-                        file_info['stream'].recv_queue.put_nowait(None)
-                        return None
-        except Exception as e:
-            logging.error(f"IBB filter error: {e}")
-        return stanza
 
     def _should_log_xml(self, xml):
         has_ft_ns = False
@@ -129,9 +97,9 @@ class FileTransferPlugin(BasePlugin):
         return has_ft_ns
 
     def _to_log_str(self, xml):
-        # Оптимизация: не делаем deepcopy для данных IBB/BoB, если они огромные
+        # Оптимизация: не делаем deepcopy для данных BoB, если они огромные
         has_large_data = False
-        for tag in ('{http://jabber.org/protocol/ibb}data', '{urn:xmpp:bob}data'):
+        for tag in ('{urn:xmpp:bob}data',):
             el = xml.find(f'.//{tag}')
             if el is not None and el.text and len(el.text) > 200:
                 has_large_data = True; break
@@ -140,12 +108,12 @@ class FileTransferPlugin(BasePlugin):
             return ET.tostring(xml, encoding='unicode')
 
         xml_copy = copy.deepcopy(xml)
-        for tag in ('{http://jabber.org/protocol/ibb}data', '{urn:xmpp:bob}data'):
+        for tag in ('{urn:xmpp:bob}data',):
             for data in xml_copy.findall(f'.//{tag}'):
                 if data.text and len(data.text) > 100:
                     data.text = data.text[:50] + f"...[TRUNCATED {len(data.text)} bytes]..." + data.text[-10:]
 
-        if xml_copy.tag.endswith('}data') and ('http://jabber.org/protocol/ibb' in xml_copy.tag or 'urn:xmpp:bob' in xml_copy.tag):
+        if xml_copy.tag.endswith('}data') and 'urn:xmpp:bob' in xml_copy.tag:
             if xml_copy.text and len(xml_copy.text) > 100:
                 xml_copy.text = xml_copy.text[:50] + f"...[TRUNCATED {len(xml_copy.text)} bytes]..." + xml_copy.text[-10:]
 
@@ -397,17 +365,15 @@ class FileTransferPlugin(BasePlugin):
                     iq.error('not-acceptable').send()
                     return
 
-                ibb_t, s5b_t = content.find('{urn:xmpp:jingle:transports:ibb:1}transport'), content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
+                s5b_t = content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
                 if s5b_t is not None and s5b_t.get('sid'): transport_sid = s5b_t.get('sid')
-                elif ibb_t is not None and ibb_t.get('sid'): transport_sid = ibb_t.get('sid')
                 else: transport_sid = sid
 
                 self.bot.pending_files[sid] = {
                     'name': fname, 'size': fsize, 'timestamp': asyncio.get_event_loop().time(),
-                    'peer_jid': iq['from'], 'ibb_allowed': True,
+                    'peer_jid': iq['from'], 'ibb_allowed': False,
                     'content_name': content.get('name'), 'content_creator': content.get('creator'),
                     'ft_ns': ft_ns, 'transport_sid': transport_sid, 's5b_connecting': False,
-                    'ibb_stanzas': ibb_t.get('stanzas') if ibb_t is not None else None,
                     'session_sid': sid, 'downloading': False,
                     'local_candidates': {},
                     's5b_activated': asyncio.Event()
@@ -440,22 +406,9 @@ class FileTransferPlugin(BasePlugin):
                             cid = hashlib.md5(p_jid.encode()).hexdigest()
                             ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=p_host, port='1080', jid=p_jid, cid=cid, priority='65536', type='proxy')
                             self.bot.pending_files[sid]['local_candidates'][cid] = p_jid
-                    elif ibb_t is not None:
-                        b_size = int(ibb_t.get('block-size', '32768'))
-                        use_msg = ibb_t.get('stanzas') == 'message' or True
-                        ibb_attrs = {'block-size': str(b_size), 'sid': transport_sid}
-                        if use_msg: ibb_attrs['stanzas'] = 'message'
-                        ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ibb:1}transport', ibb_attrs)
-                        from slixmpp.plugins.xep_0047 import IBBytestream
-                        stream = IBBytestream(self.bot, transport_sid, b_size, self.bot.boundjid, iq['from'], use_msg)
-                        self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, transport_sid, iq['from'], stream)
-                        self.bot.event('ibb_stream_start', stream)
                     else:
-                        ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ibb:1}transport', {'block-size': '32768', 'sid': sid, 'stanzas': 'message'})
-                        from slixmpp.plugins.xep_0047 import IBBytestream
-                        stream = IBBytestream(self.bot, sid, 32768, self.bot.boundjid, iq['from'], True)
-                        self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, sid, iq['from'], stream)
-                        self.bot.event('ibb_stream_start', stream)
+                        # Transport not supported and no IBB fallback allowed
+                        iq.error('bad-request').send(); return
 
                     accept_iq.append(res_j)
                     accept_iq.send()
@@ -499,25 +452,7 @@ class FileTransferPlugin(BasePlugin):
                             self.bot.pending_files[f"jingle_s5b_info_{sid}"] = asyncio.create_task(self._socks5_connect_and_save(iq, jingle_sid=sid))
                 iq.reply().send()
             elif action == 'transport-replace':
-                content = jingle.find('{urn:xmpp:jingle:1}content')
-                if content is not None:
-                    ibb_t = content.find('{urn:xmpp:jingle:transports:ibb:1}transport')
-                    if ibb_t is not None:
-                        if sid in self.bot.pending_files:
-                            ibb_sid = ibb_t.get('sid')
-                            self.bot.pending_files[sid]['transport_sid'] = ibb_sid
-                            self.bot.pending_files[sid]['ibb_stanzas'] = ibb_t.get('stanzas')
-                            self.bot.pending_files[ibb_sid] = self.bot.pending_files[sid]
-                            reply = self.bot.make_iq_set(ito=iq['from'])
-                            res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'transport-accept', 'sid': sid, 'initiator': iq['from'].full})
-                            res_c = ET.SubElement(res_j, '{urn:xmpp:jingle:1}content', {'creator': content.get('creator'), 'name': content.get('name')})
-                            ibb_attrs = {'sid': ibb_sid, 'block-size': '32768', 'stanzas': 'message'}
-                            ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ibb:1}transport', ibb_attrs)
-                            from slixmpp.plugins.xep_0047 import IBBytestream
-                            stream = IBBytestream(self.bot, ibb_sid, 32768, self.bot.boundjid, iq['from'], True)
-                            self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, ibb_sid, iq['from'], stream)
-                            self.bot.event('ibb_stream_start', stream)
-                            reply.append(res_j); reply.send()
+                # Not supporting transport-replace (especially for IBB)
                 iq.reply().send()
             elif action == 'transport-accept':
                 iq.reply().send()
@@ -565,14 +500,15 @@ class FileTransferPlugin(BasePlugin):
                     if field is not None:
                         offered_methods = [v.text for v in field.findall('{jabber:x:data}value')]
                         offered_methods.extend([v.text for v in field.findall('{jabber:x:data}option/{jabber:x:data}value')])
-            chosen_method = next((m for m in ['jabber:iq:oob', 'http://jabber.org/protocol/bytestreams', 'http://jabber.org/protocol/ibb'] if m in offered_methods), None)
+            chosen_method = next((m for m in ['jabber:iq:oob', 'http://jabber.org/protocol/bytestreams'] if m in offered_methods), None)
             if not chosen_method:
                 iq.error('bad-request').send()
                 return
             self.bot.pending_files[sid] = {
                 'name': fname, 'size': fsize, 'timestamp': asyncio.get_event_loop().time(),
-                'ibb_allowed': 'http://jabber.org/protocol/ibb' in offered_methods,
-                'peer_jid': iq['from'], 'transport_sid': sid, 'downloading': False
+                'ibb_allowed': False,
+                'peer_jid': iq['from'], 'transport_sid': sid, 'downloading': False,
+                's5b_activated': asyncio.Event()
             }
             reply = iq.reply()
             res_si = ET.Element('{http://jabber.org/protocol/si}si', {'id': sid})
@@ -636,11 +572,10 @@ class FileTransferPlugin(BasePlugin):
             t_sid = file_info.get('transport_sid', sid)
             dst_addr = hashlib.sha1(f"{t_sid}{peer_full}{self.bot.boundjid.full}".encode()).hexdigest()
 
-            if jingle_sid and not hosts:
-                jingle = iq.xml.find('{urn:xmpp:jingle:1}jingle')
-                if jingle is not None and jingle.get('action') == 'session-initiate':
+            if not hosts:
+                if jingle_sid:
                     self.bot.pending_files[sid]['s5b_connecting'] = False
-                    return
+                return
 
             for host in hosts:
                 try:
@@ -673,8 +608,13 @@ class FileTransferPlugin(BasePlugin):
                     if host.get('type') == 'proxy':
                         logging.info(f"S5B: Connected to proxy for sid={sid}, waiting for activation...")
                         try:
-                            await asyncio.wait_for(file_info['s5b_activated'].wait(), timeout=15)
-                            logging.info(f"S5B: Proxy activated for sid={sid}")
+                            # Safety check for Event existence
+                            event = file_info.get('s5b_activated')
+                            if event:
+                                await asyncio.wait_for(event.wait(), timeout=15)
+                                logging.info(f"S5B: Proxy activated for sid={sid}")
+                            else:
+                                logging.warning(f"S5B: No activation event for sid={sid}")
                         except asyncio.TimeoutError:
                             logging.warning(f"S5B: Proxy activation timeout for sid={sid}")
                             writer.close(); await writer.wait_closed(); continue
@@ -686,23 +626,6 @@ class FileTransferPlugin(BasePlugin):
                     logging.info(f"S5B: Failed connect to {host.get('host')} for sid={sid}: {e}")
                     continue
             if not jingle_sid: iq.error('service-unavailable').send()
-            elif file_info.get('ibb_allowed'):
-                logging.info(f"SOCKS5 failed for Jingle sid={sid}, falling back to IBB")
-                new_ibb_sid = f"fallback_{sid}"
-                self.bot.pending_files[sid]['transport_sid'] = new_ibb_sid
-                self.bot.pending_files[new_ibb_sid] = self.bot.pending_files[sid]
-                reply = self.bot.make_iq_set(ito=iq['from'])
-                res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'transport-replace', 'sid': sid, 'initiator': iq['from'].full})
-                res_c = ET.SubElement(res_j, '{urn:xmpp:jingle:1}content', {'creator': file_info.get('content_creator', 'initiator'), 'name': file_info.get('content_name', 'file')})
-                use_msg = self.bot.pending_files.get(sid, {}).get('ibb_stanzas') == 'message' or True
-                ibb_attrs = {'sid': new_ibb_sid, 'block-size': '32768'}
-                if use_msg: ibb_attrs['stanzas'] = 'message'
-                ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ibb:1}transport', ibb_attrs)
-                from slixmpp.plugins.xep_0047 import IBBytestream
-                stream = IBBytestream(self.bot, new_ibb_sid, 32768, self.bot.boundjid, iq['from'], use_msg)
-                self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, new_ibb_sid, iq['from'], stream)
-                self.bot.event('ibb_stream_start', stream)
-                reply.append(res_j); reply.send()
             else:
                 if jingle_sid:
                     logging.info(f"SOCKS5 failed for Jingle sid={sid}, no IBB fallback allowed. Terminating.")
@@ -714,18 +637,6 @@ class FileTransferPlugin(BasePlugin):
                 if sid in self.bot.pending_files: del self.bot.pending_files[sid]
         except Exception as e: logging.error(f"SOCKS5 ERROR: {e}")
 
-    def handle_ibb_stream(self, stream):
-        sid = stream.sid
-        file_info = self.bot.pending_files.get(sid)
-        if file_info:
-            if file_info['peer_jid'].bare != stream.peer_jid.bare:
-                stream.close(); return
-            logging.info(f"IBB stream started for sid={sid}, peer={stream.peer_jid}")
-            self.bot.pending_files[sid]['stream'] = stream
-            task = asyncio.create_task(self.download_file_task(stream, file_info, stream.peer_jid, sid))
-            self.bot.pending_files[f"task_{sid}"] = task
-        else: stream.close()
-
     async def download_file_task(self, reader, file_info, peer_jid, sid):
         logging.info(f"DOWNLOAD START: sid={sid}, peer={peer_jid}, file={file_info['name']}, size={file_info['size']}")
         user_dir, user_hash = self.bot.get_user_info(peer_jid)
@@ -736,8 +647,7 @@ class FileTransferPlugin(BasePlugin):
             with open(part_path, 'wb') as f:
                 while received < file_info['size']:
                     try:
-                        if hasattr(reader, 'recv_queue'): chunk = await asyncio.wait_for(reader.recv_queue.get(), timeout=60)
-                        else: chunk = await asyncio.wait_for(reader.read(min(file_info['size'] - received, 1048576)), timeout=60)
+                        chunk = await asyncio.wait_for(reader.read(min(file_info['size'] - received, 1048576)), timeout=60)
                         if not chunk: break
                         await loop.run_in_executor(None, f.write, chunk)
                         received += len(chunk)
