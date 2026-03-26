@@ -464,7 +464,7 @@ class FileTransferPlugin(BasePlugin):
                 iq.reply().send()
             elif action == 'transport-replace':
                 # Not supporting transport-replace (especially for IBB)
-                iq.reply().send()
+                self._send_iq_error(iq, 'feature-not-implemented')
             elif action == 'transport-accept':
                 iq.reply().send()
             elif action == 'session-terminate':
