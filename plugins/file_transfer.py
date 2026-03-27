@@ -31,18 +31,18 @@ class FileTransferPlugin(BasePlugin):
     }
 
     FT_NAMESPACES = [
+        'urn:xmpp:jingle:1',
+        'urn:xmpp:jingle:apps:file-transfer:5',
+        'urn:xmpp:jingle:apps:file-transfer:4',
+        'urn:xmpp:jingle:apps:file-transfer:3',
+        'urn:xmpp:jingle:apps:file-transfer:2',
+        'urn:xmpp:jingle:apps:file-transfer:1',
+        'urn:xmpp:jingle:transports:s5b:1',
+        'urn:xmpp:jingle:transports:ibb:1',
         'http://jabber.org/protocol/si',
         'http://jabber.org/protocol/si/profile/file-transfer',
         'http://jabber.org/protocol/bytestreams',
         'http://jabber.org/protocol/ibb',
-        'urn:xmpp:jingle:1',
-        'urn:xmpp:jingle:apps:file-transfer:1',
-        'urn:xmpp:jingle:apps:file-transfer:2',
-        'urn:xmpp:jingle:apps:file-transfer:3',
-        'urn:xmpp:jingle:apps:file-transfer:4',
-        'urn:xmpp:jingle:apps:file-transfer:5',
-        'urn:xmpp:jingle:transports:s5b:1',
-        'urn:xmpp:jingle:transports:ibb:1',
         'jabber:iq:oob',
         'jabber:x:oob',
         'urn:xmpp:bob',
@@ -421,15 +421,16 @@ class FileTransferPlugin(BasePlugin):
 
                 try:
                     accept_iq = self.bot.make_iq_set(ito=iq['from'])
-                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-accept', 'sid': sid, 'initiator': iq['from'].full})
-                    res_c = ET.SubElement(res_j, '{urn:xmpp:jingle:1}content', {'creator': content.get('creator'), 'name': content.get('name')})
+                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-accept', 'sid': sid, 'responder': self.bot.boundjid.full})
+                    res_c = ET.SubElement(res_j, '{urn:xmpp:jingle:1}content', {'creator': content.get('creator'), 'name': content.get('name'), 'senders': 'initiator'})
                     res_d = ET.SubElement(res_c, f'{{{ft_ns}}}description')
-                    res_f = ET.SubElement(res_d, f'{{{ft_ns}}}file')
-                    ET.SubElement(res_f, f'{{{ft_ns}}}name').text = fname
-                    ET.SubElement(res_f, f'{{{ft_ns}}}size').text = str(fsize)
+                    if ft_ns != 'urn:xmpp:jingle:apps:file-transfer:5':
+                        res_f = ET.SubElement(res_d, f'{{{ft_ns}}}file')
+                        ET.SubElement(res_f, f'{{{ft_ns}}}name').text = fname
+                        ET.SubElement(res_f, f'{{{ft_ns}}}size').text = str(fsize)
 
                     if s5b_t is not None:
-                        res_t = ET.SubElement(res_c, '{urn:xmpp:jingle:transports:s5b:1}transport', {'sid': transport_sid, 'mode': 'tcp'})
+                        res_t = ET.SubElement(res_c, '{urn:xmpp:jingle:transports:s5b:1}transport', {'sid': transport_sid, 'mode': 'tcp', 'block-size': '8192'})
                         local_ip = self.get_local_ip()
                         ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=local_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-local', priority='8253074', type='host')
                         if SOCKS5_IP and SOCKS5_IP != local_ip:
@@ -511,6 +512,14 @@ class FileTransferPlugin(BasePlugin):
             self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Доступ запрещён. Пожалуйста, обратитесь к администратору для получения доступа: {ADMIN_JID}", mtype='chat')
             iq.error('not-allowed').send()
             return
+
+        # Force Jingle for Monocles
+        resource = iq['from'].resource
+        if resource and 'monocles' in resource.lower():
+            logging.info(f"SI: Forcing Jingle for {iq['from']} (monocles detected)")
+            iq.error('feature-not-implemented').send()
+            return
+
         try:
             si = iq.xml.find('{http://jabber.org/protocol/si}si')
             sid, tag = si.get('id'), si.find('{http://jabber.org/protocol/si/profile/file-transfer}file')
@@ -707,11 +716,11 @@ class FileTransferPlugin(BasePlugin):
                 if session_sid and ft_ns:
                     logging.info(f"JINGLE COMPLETE: Sending session-info (received) and session-terminate (success) for sid={session_sid}")
                     info_iq = self.bot.make_iq_set(ito=peer_jid)
-                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-info', 'sid': session_sid, 'initiator': peer_jid.full})
-                    ET.SubElement(res_j, f'{{{ft_ns}}}received')
+                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-info', 'sid': session_sid})
+                    ET.SubElement(res_j, f'{{{ft_ns}}}received', {'creator': file_info.get('content_creator', 'initiator'), 'name': file_info.get('content_name', 'file')})
                     info_iq.append(res_j); info_iq.send()
                     term_iq = self.bot.make_iq_set(ito=peer_jid)
-                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-terminate', 'sid': session_sid, 'initiator': peer_jid.full})
+                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-terminate', 'sid': session_sid})
                     reason = ET.SubElement(res_j, '{urn:xmpp:jingle:1}reason')
                     ET.SubElement(reason, '{urn:xmpp:jingle:1}success')
                     term_iq.append(res_j); term_iq.send()
