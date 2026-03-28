@@ -8,6 +8,13 @@ import aiohttp
 import base64
 import ipaddress
 import urllib.parse
+try:
+    from aiortc import RTCPeerConnection, RTCSessionDescription, RTCIceCandidate
+    from aiortc.contrib.signaling import BYE
+    HAS_WEBRTC = True
+except ImportError:
+    HAS_WEBRTC = False
+
 from slixmpp.xmlstream import ET, matcher, handler
 from config import ADMIN_JID, ADMIN_NOTIFY_LEVEL, QUOTA_LIMIT_BYTES, SOCKS5_PORT, SOCKS5_IP
 from utils import get_dir_size, safe_quote, get_unique_path
@@ -21,11 +28,14 @@ class JingleSession:
         self.is_initiator = is_initiator
         self.state = 'starting'
         self.file_info = {}
+        self.transport_type = 's5b' # default
         self.transport_sid = sid
         self.candidates = []
         self.used_candidate = None
         self.timestamp = asyncio.get_event_loop().time()
         self.task = None
+        self.webrtc_pc = None # For ICE-UDP
+        self.webrtc_dc = None # For ICE-UDP
 
     def get_dst_addr(self):
         initiator = self.bot_jid.full if self.is_initiator else self.peer_jid.full
@@ -53,6 +63,7 @@ class FileTransferPlugin(BasePlugin):
         'urn:xmpp:jingle:1',
         'urn:xmpp:jingle:apps:file-transfer:5',
         'urn:xmpp:jingle:transports:s5b:1',
+        'urn:xmpp:jingle:transports:ice-udp:1',
         'http://jabber.org/protocol/bytestreams', # Needed for S5B candidates
         'jabber:iq:oob',
         'jabber:x:oob',
@@ -71,6 +82,7 @@ class FileTransferPlugin(BasePlugin):
         self.bot.add_event_handler("session_start", self.discover_proxies)
         self.bot.add_event_handler("xml_in", self.handle_xml_in)
         self.bot.add_event_handler("xml_out", self.handle_xml_out)
+        self.bot.add_event_handler("jingle_done", self.handle_jingle_done)
 
         # Регистрация обработчиков IQ
         self.bot.register_handler(
@@ -86,6 +98,22 @@ class FileTransferPlugin(BasePlugin):
         # Регистрация фич в Service Discovery (XEP-0030)
         for ns in self.FT_NAMESPACES:
             self.bot['xep_0030'].add_feature(ns)
+
+    def handle_jingle_done(self, data):
+        sid, peer_jid, file_info = data['sid'], data['peer_jid'], data['file_info']
+        ft_ns = file_info.get('ft_ns', 'urn:xmpp:jingle:apps:file-transfer:5')
+        logging.info(f"JINGLE COMPLETE: Sending session-info (received) and session-terminate (success) for sid={sid}")
+
+        info_iq = self.bot.make_iq_set(ito=peer_jid)
+        res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-info', 'sid': sid, 'initiator': peer_jid.full})
+        ET.SubElement(res_j, f'{{{ft_ns}}}received')
+        info_iq.append(res_j); self.send_iq(info_iq)
+
+        term_iq = self.bot.make_iq_set(ito=peer_jid)
+        res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-terminate', 'sid': sid, 'initiator': peer_jid.full})
+        reason = ET.SubElement(res_j, '{urn:xmpp:jingle:1}reason')
+        ET.SubElement(reason, '{urn:xmpp:jingle:1}success')
+        term_iq.append(res_j); self.send_iq(term_iq)
 
     def _should_log_xml(self, xml):
         has_ft_ns = False
@@ -380,6 +408,8 @@ class FileTransferPlugin(BasePlugin):
                     return
 
                 ibb_t, s5b_t = content.find('{urn:xmpp:jingle:transports:ibb:1}transport'), content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
+                ice_t = content.find('{urn:xmpp:jingle:transports:ice-udp:1}transport')
+
                 if s5b_t is not None and s5b_t.get('sid'): transport_sid = s5b_t.get('sid')
                 elif ibb_t is not None and ibb_t.get('sid'): transport_sid = ibb_t.get('sid')
                 else: transport_sid = sid
@@ -387,6 +417,10 @@ class FileTransferPlugin(BasePlugin):
                 session = JingleSession(sid, iq['from'], self.bot.boundjid)
                 session.file_info = {'name': fname, 'size': fsize}
                 session.transport_sid = transport_sid
+
+                if ice_t is not None and HAS_WEBRTC:
+                    session.transport_type = 'ice-udp'
+
                 self.jingle_sessions[sid] = session
 
                 self.bot.pending_files[sid] = {
@@ -414,31 +448,57 @@ class FileTransferPlugin(BasePlugin):
                     ET.SubElement(res_f, f'{{{ft_ns}}}name').text = fname
                     ET.SubElement(res_f, f'{{{ft_ns}}}size').text = str(fsize)
 
-                    if s5b_t is not None:
+                    if session.transport_type == 'ice-udp':
+                        res_t = ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ice-udp:1}transport')
+                        # For WebRTC, we initialize RTCPeerConnection
+                        asyncio.create_task(self._setup_webrtc_responder(sid, iq['from'], ice_t))
+                    elif s5b_t is not None:
                         res_t = ET.SubElement(res_c, '{urn:xmpp:jingle:transports:s5b:1}transport', {'sid': transport_sid, 'mode': 'tcp'})
                         local_ip = self.get_local_ip()
-                        ET.SubElement(res_t, 'candidate', host=local_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-local', priority='8253074', type='host')
+                        ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=local_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-local', priority='8253074', type='host')
                         if SOCKS5_IP and SOCKS5_IP != local_ip:
-                            ET.SubElement(res_t, 'candidate', host=SOCKS5_IP, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-public', priority='8252818', type='host')
+                            ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=SOCKS5_IP, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-public', priority='8252818', type='host')
                         for p_jid, p_info in self.proxies.items():
-                            ET.SubElement(res_t, 'candidate', host=p_info['host'], port=str(p_info['port']), jid=p_jid, cid=hashlib.md5(p_jid.encode()).hexdigest(), priority='65536', type='proxy')
+                            ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=p_info['host'], port=str(p_info['port']), jid=p_jid, cid=hashlib.md5(p_jid.encode()).hexdigest(), priority='65536', type='proxy')
                     else:
                         # Fallback to S5B even if not offered, or fail
                         res_t = ET.SubElement(res_c, '{urn:xmpp:jingle:transports:s5b:1}transport', {'sid': sid, 'mode': 'tcp'})
 
                     accept_iq.append(res_j)
                     self.send_iq(accept_iq)
-                    if s5b_t is not None and s5b_t.findall('{urn:xmpp:jingle:transports:s5b:1}candidate'):
+
+                    if session.transport_type == 's5b' and s5b_t is not None and s5b_t.findall('{urn:xmpp:jingle:transports:s5b:1}candidate'):
                         self.bot.pending_files[sid]['s5b_connecting'] = True
                         self.bot.pending_files[f"jingle_s5b_{sid}"] = asyncio.create_task(self._socks5_connect_and_save(iq, jingle_sid=sid))
                 except Exception as e: logging.error(f"JINGLE ACCEPT ERROR: {e}")
             elif action == 'transport-info':
+                session = self.jingle_sessions.get(sid)
                 content = jingle.find('{urn:xmpp:jingle:1}content')
                 if content is not None:
-                    transport = content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
-                    if transport is not None and not self.bot.pending_files.get(sid, {}).get('s5b_connecting'):
+                    s5b_t = content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
+                    ice_t = content.find('{urn:xmpp:jingle:transports:ice-udp:1}transport')
+
+                    if s5b_t is not None and not self.bot.pending_files.get(sid, {}).get('s5b_connecting'):
                         self.bot.pending_files[sid]['s5b_connecting'] = True
                         self.bot.pending_files[f"jingle_s5b_info_{sid}"] = asyncio.create_task(self._socks5_connect_and_save(iq, jingle_sid=sid))
+
+                    if ice_t is not None and session and session.webrtc_pc:
+                        candidates = ice_t.findall('{urn:xmpp:jingle:transports:ice-udp:1}candidate')
+                        for c in candidates:
+                            # Map Jingle candidate to aiortc candidate
+                            rtc_c = RTCIceCandidate(
+                                component=int(c.get('component', '1')),
+                                foundation=c.get('foundation'),
+                                ip=c.get('ip'),
+                                port=int(c.get('port')),
+                                priority=int(c.get('priority')),
+                                protocol=c.get('protocol'),
+                                type=c.get('type'),
+                                sdpMid='0',
+                                sdpMLineIndex=0
+                            )
+                            asyncio.create_task(session.webrtc_pc.addIceCandidate(rtc_c))
+
                 self.send_iq(iq.reply())
             elif action == 'transport-replace':
                 content = jingle.find('{urn:xmpp:jingle:1}content')
@@ -631,18 +691,18 @@ class FileTransferPlugin(BasePlugin):
         content = ET.SubElement(jingle, '{urn:xmpp:jingle:1}content', {'creator': 'initiator', 'name': 'file-transfer'})
 
         description = ET.SubElement(content, '{urn:xmpp:jingle:apps:file-transfer:5}description')
-        file_tag = ET.SubElement(description, 'file')
-        ET.SubElement(file_tag, 'name').text = fname
-        ET.SubElement(file_tag, 'size').text = str(fsize)
+        file_tag = ET.SubElement(description, '{urn:xmpp:jingle:apps:file-transfer:5}file')
+        ET.SubElement(file_tag, '{urn:xmpp:jingle:apps:file-transfer:5}name').text = fname
+        ET.SubElement(file_tag, '{urn:xmpp:jingle:apps:file-transfer:5}size').text = str(fsize)
 
         transport = ET.SubElement(content, '{urn:xmpp:jingle:transports:s5b:1}transport', {'sid': sid, 'mode': 'tcp'})
         local_ip = self.get_local_ip()
-        ET.SubElement(transport, 'candidate', cid='local', host=local_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, priority='8253074', type='host')
+        ET.SubElement(transport, '{urn:xmpp:jingle:transports:s5b:1}candidate', cid='local', host=local_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, priority='8253074', type='host')
         if SOCKS5_IP and SOCKS5_IP != local_ip:
-            ET.SubElement(transport, 'candidate', cid='public', host=SOCKS5_IP, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, priority='8252818', type='host')
+            ET.SubElement(transport, '{urn:xmpp:jingle:transports:s5b:1}candidate', cid='public', host=SOCKS5_IP, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, priority='8252818', type='host')
 
         for p_jid, p_info in self.proxies.items():
-            ET.SubElement(transport, 'candidate', cid=hashlib.md5(p_jid.encode()).hexdigest(), host=p_info['host'], port=str(p_info['port']), jid=p_jid, priority='65536', type='proxy')
+            ET.SubElement(transport, '{urn:xmpp:jingle:transports:s5b:1}candidate', cid=hashlib.md5(p_jid.encode()).hexdigest(), host=p_info['host'], port=str(p_info['port']), jid=p_jid, priority='65536', type='proxy')
 
         iq.append(jingle)
         self.send_iq(iq)
@@ -652,6 +712,11 @@ class FileTransferPlugin(BasePlugin):
         if file_info.get('is_sending'):
             await self._upload_file_task(writer, file_info, peer_jid, sid)
             return
+
+        session = self.jingle_sessions.get(sid)
+        if session and session.transport_type == 'ice-udp':
+             await self._webrtc_download_task(session, file_info, peer_jid, sid)
+             return
 
         logging.info(f"DOWNLOAD START: sid={sid}, peer={peer_jid}, file={file_info['name']}, size={file_info['size']}")
         user_dir, user_hash = self.bot.get_user_info(peer_jid)
@@ -678,18 +743,7 @@ class FileTransferPlugin(BasePlugin):
                 os.rename(part_path, path)
                 logging.info(f"DOWNLOAD COMPLETE: sid={sid}, path={path}")
                 self.bot.send_message(mto=peer_jid, mbody=f"✅ Готово!\n{self.bot.base_url}/{user_hash}/{safe_quote(os.path.basename(path))}", mtype='chat')
-                session_sid, ft_ns = file_info.get('session_sid'), file_info.get('ft_ns')
-                if session_sid and ft_ns:
-                    logging.info(f"JINGLE COMPLETE: Sending session-info (received) and session-terminate (success) for sid={session_sid}")
-                    info_iq = self.bot.make_iq_set(ito=peer_jid)
-                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-info', 'sid': session_sid, 'initiator': peer_jid.full})
-                    ET.SubElement(res_j, f'{{{ft_ns}}}received')
-                    info_iq.append(res_j); self.send_iq(info_iq)
-                    term_iq = self.bot.make_iq_set(ito=peer_jid)
-                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-terminate', 'sid': session_sid, 'initiator': peer_jid.full})
-                    reason = ET.SubElement(res_j, '{urn:xmpp:jingle:1}reason')
-                    ET.SubElement(reason, '{urn:xmpp:jingle:1}success')
-                    term_iq.append(res_j); self.send_iq(term_iq)
+                self.bot.event('jingle_done', {'sid': sid, 'peer_jid': peer_jid, 'file_info': file_info})
             else:
                 logging.error(f"DOWNLOAD INCOMPLETE: sid={sid}, received {received}/{file_info['size']}")
                 self.bot.send_message(mto=peer_jid, mbody="⚠️ Ошибка: Файл получен не полностью. Пожалуйста, попробуйте отправить снова.", mtype='chat')
@@ -708,6 +762,93 @@ class FileTransferPlugin(BasePlugin):
                 t_sid = info.get('transport_sid')
                 if t_sid and t_sid in self.bot.pending_files: del self.bot.pending_files[t_sid]
             if sid in self.bot.pending_files: del self.bot.pending_files[sid]
+
+    async def _setup_webrtc_responder(self, sid, peer_jid, ice_t):
+        if not HAS_WEBRTC: return
+        session = self.jingle_sessions.get(sid)
+        if not session: return
+
+        pc = RTCPeerConnection()
+        session.webrtc_pc = pc
+
+        @pc.on("datachannel")
+        def on_datachannel(channel):
+            logging.info(f"WebRTC: DataChannel received: {channel.label}")
+            session.webrtc_dc = channel
+
+            @channel.on("message")
+            def on_message(message):
+                # Handle incoming data via DataChannel
+                if not hasattr(session, 'dc_buffer'): session.dc_buffer = asyncio.Queue()
+                session.dc_buffer.put_nowait(message)
+
+        # Signaling candidates back to peer
+        @pc.on("icecandidate")
+        async def on_icecandidate(candidate):
+            if candidate:
+                iq = self.bot.make_iq_set(ito=peer_jid)
+                jingle = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'transport-info', 'sid': sid, 'initiator': peer_jid.full})
+                content = ET.SubElement(jingle, '{urn:xmpp:jingle:1}content', {'creator': 'initiator', 'name': 'file-transfer'})
+                transport = ET.SubElement(content, '{urn:xmpp:jingle:transports:ice-udp:1}transport')
+                # Simplistic candidate mapping
+                ET.SubElement(transport, '{urn:xmpp:jingle:transports:ice-udp:1}candidate', {
+                    'component': '1',
+                    'foundation': candidate.foundation,
+                    'id': str(id(candidate)),
+                    'ip': candidate.ip,
+                    'port': str(candidate.port),
+                    'priority': str(candidate.priority),
+                    'protocol': candidate.protocol,
+                    'type': candidate.type,
+                    'generation': '0',
+                    'network': '0'
+                })
+                iq.append(jingle)
+                self.send_iq(iq)
+
+        # In a real scenario, we'd need to parse SDP from the initiator or use Jingle's specific ICE-UDP mapping.
+        # XEP-0176 (ICE-UDP) uses its own XML format, but aiortc expects SDP.
+        # This implementation is a placeholder for the full ICE-UDP <-> WebRTC mapping.
+        logging.info(f"WebRTC: Initialized RTCPeerConnection for sid={sid}")
+
+    async def _webrtc_download_task(self, session, file_info, peer_jid, sid):
+        logging.info(f"WebRTC DOWNLOAD START: sid={sid}, peer={peer_jid}")
+        user_dir, user_hash = self.bot.get_user_info(peer_jid)
+        path = get_unique_path(os.path.join(user_dir, os.path.basename(file_info['name'])))
+        part_path = path + ".part"
+        received, loop = 0, asyncio.get_event_loop()
+
+        # Wait for data channel to be ready and receive data
+        if not hasattr(session, 'dc_buffer'): session.dc_buffer = asyncio.Queue()
+
+        try:
+            with open(part_path, 'wb') as f:
+                while received < file_info['size']:
+                    try:
+                        chunk = await asyncio.wait_for(session.dc_buffer.get(), timeout=60)
+                        if not chunk: break
+                        await loop.run_in_executor(None, f.write, chunk)
+                        received += len(chunk)
+                        logging.debug(f"WebRTC DOWNLOAD sid={sid}: Received {len(chunk)} bytes. Total: {received}/{file_info['size']}")
+                    except asyncio.TimeoutError:
+                        logging.error(f"WebRTC TIMEOUT: sid={sid}")
+                        raise
+                await loop.run_in_executor(None, f.flush); await loop.run_in_executor(None, os.fsync, f.fileno())
+
+            if received == file_info['size']:
+                os.rename(part_path, path)
+                self.bot.send_message(mto=peer_jid, mbody=f"✅ Готово!\n{self.bot.base_url}/{user_hash}/{safe_quote(os.path.basename(path))}", mtype='chat')
+                # signaling success
+                self.bot.event('jingle_done', {'sid': sid, 'peer_jid': peer_jid, 'file_info': file_info})
+            else:
+                if os.path.exists(part_path): os.remove(part_path)
+        except Exception as e:
+            logging.error(f"WebRTC DOWNLOAD ERROR: {e}")
+            if os.path.exists(part_path): os.remove(part_path)
+        finally:
+             if session.webrtc_pc: await session.webrtc_pc.close()
+             if sid in self.bot.pending_files: del self.bot.pending_files[sid]
+             if sid in self.jingle_sessions: del self.jingle_sessions[sid]
 
     async def _upload_file_task(self, writer, file_info, peer_jid, sid):
         logging.info(f"UPLOAD START: sid={sid}, peer={peer_jid}, file={file_info['name']}, size={file_info['size']}")

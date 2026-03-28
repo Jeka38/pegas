@@ -4,7 +4,9 @@ import logging
 from unittest.mock import MagicMock, AsyncMock
 from plugins.file_transfer import FileTransferPlugin
 from slixmpp.xmlstream import ET
+import pytest
 
+@pytest.mark.asyncio
 async def test_proxy_discovery():
     logging.basicConfig(level=logging.DEBUG)
 

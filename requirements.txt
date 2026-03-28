@@ -3,3 +3,4 @@
 slixmpp
 aiohttp
 python-dotenv
+aiortc
