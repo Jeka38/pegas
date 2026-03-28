@@ -30,6 +30,10 @@ XMPP_PASSWORD = os.getenv('XMPP_PASSWORD')
 XMPP_HOST = os.getenv('XMPP_HOST', 'jabberworld.info')
 XMPP_PORT = int(os.getenv('XMPP_PORT', 5222))
 
+# WebRTC settings
+STUN_SERVERS = os.getenv('STUN_SERVERS', 'stun:stun.l.google.com:19302,stun:stun1.l.google.com:19302').split(',')
+TURN_SERVERS = os.getenv('TURN_SERVERS', '').split(',') # Format: turn:user:pass@host:port
+
 # Bot appearance and metadata
 APP_NAME = os.getenv('APP_NAME', 'OBBFastBot')
 VERSION = os.getenv('APP_VERSION', '1.1')
