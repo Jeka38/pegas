@@ -36,6 +36,7 @@ class OBBFastBot(ClientXMPP):
         self.register_plugin('xep_0199')
         self['xep_0199'].send_keepalive = True
         self['xep_0199'].interval = 60
+        self.register_plugin('xep_0065')
         self.register_plugin('xep_0092')
         self['xep_0092'].software_name = APP_NAME
 

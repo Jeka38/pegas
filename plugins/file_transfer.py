@@ -53,6 +53,8 @@ class FileTransferPlugin(BasePlugin):
         super().__init__(bot)
         self._tracked_ft_ids = set()
         self._ft_ns_prefixes = [f'{{{ns}}}' for ns in self.FT_NAMESPACES]
+        self.proxies = copy.deepcopy(self.KNOWN_PROXIES)
+        self.bot.add_event_handler("session_start", self.discover_proxies)
         self.bot.add_event_handler("xml_in", self.handle_xml_in)
         self.bot.add_event_handler("xml_out", self.handle_xml_out)
 
@@ -434,8 +436,8 @@ class FileTransferPlugin(BasePlugin):
                         ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=local_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-local', priority='8253074', type='host')
                         if SOCKS5_IP and SOCKS5_IP != local_ip:
                             ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=SOCKS5_IP, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-public', priority='8252818', type='host')
-                        for p_host, p_jid in [('proxy.eu.jabber.network', 'proxy.eu.jabber.network'), ('proxy.jabber.ru', 'proxy.jabber.ru')]:
-                            ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=p_host, port='1080', jid=p_jid, cid=hashlib.md5(p_jid.encode()).hexdigest(), priority='65536', type='proxy')
+                        for p_jid, p_info in self.proxies.items():
+                            ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=p_info['host'], port=str(p_info['port']), jid=p_jid, cid=hashlib.md5(p_jid.encode()).hexdigest(), priority='65536', type='proxy')
                     elif ibb_t is not None:
                         b_size = int(ibb_t.get('block-size', '32768'))
                         use_msg = ibb_t.get('stanzas') == 'message' or True
@@ -582,7 +584,7 @@ class FileTransferPlugin(BasePlugin):
                 sid, peer_full = query.get('sid'), iq['from'].full
                 used = query.find('{http://jabber.org/protocol/bytestreams}streamhost-used')
                 if used is not None:
-                    jid = used.get('jid'); proxy = self.KNOWN_PROXIES.get(jid)
+                    jid = used.get('jid'); proxy = self.proxies.get(jid)
                     if proxy: hosts = [ET.Element('streamhost', host=proxy['host'], port=str(proxy['port']), jid=jid)]
                     else: iq.error('item-not-found').send(); return
                 else:
@@ -594,7 +596,7 @@ class FileTransferPlugin(BasePlugin):
                     ET.SubElement(res_q, '{http://jabber.org/protocol/bytestreams}streamhost', host=local_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full)
                     if SOCKS5_IP and SOCKS5_IP != local_ip:
                          ET.SubElement(res_q, '{http://jabber.org/protocol/bytestreams}streamhost', host=SOCKS5_IP, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full)
-                    for p_jid, p_info in self.KNOWN_PROXIES.items():
+                    for p_jid, p_info in self.proxies.items():
                         ET.SubElement(res_q, '{http://jabber.org/protocol/bytestreams}streamhost', host=p_info['host'], port=str(p_info['port']), jid=p_jid)
                     reply.append(res_q); reply.send(); return
 
@@ -676,6 +678,27 @@ class FileTransferPlugin(BasePlugin):
             task = asyncio.create_task(self.download_file_task(stream, file_info, stream.peer_jid, sid))
             self.bot.pending_files[f"task_{sid}"] = task
         else: stream.close()
+
+    async def discover_proxies(self, event):
+        logging.info("S5B: Starting proxy discovery...")
+        try:
+            proxy_jids = await self.bot['xep_0065'].discover_proxies()
+            if proxy_jids:
+                for jid in proxy_jids:
+                    try:
+                        info = await self.bot['xep_0065'].get_network_address(jid)
+                        if info:
+                            self.proxies[jid] = {
+                                'host': info['host'],
+                                'port': int(info['port'])
+                            }
+                            logging.info(f"S5B: Discovered proxy {jid} at {info['host']}:{info['port']}")
+                    except Exception as e:
+                        logging.error(f"S5B: Failed to get address for proxy {jid}: {e}")
+            else:
+                logging.info("S5B: No proxies discovered via server.")
+        except Exception as e:
+            logging.error(f"S5B: Proxy discovery error: {e}")
 
     async def download_file_task(self, reader, file_info, peer_jid, sid):
         logging.info(f"DOWNLOAD START: sid={sid}, peer={peer_jid}, file={file_info['name']}, size={file_info['size']}")
