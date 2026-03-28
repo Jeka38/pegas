@@ -192,6 +192,7 @@ class FileTransferPlugin(BasePlugin):
                         info['downloading'] = True
                         writer.write(b"\x05\x00\x00\x03" + bytes([len(dst_addr)]) + dst_addr.encode() + port)
                         await writer.drain()
+                        logging.debug(f"SOCKS5: Match found for sid={sid}, dst_addr={dst_addr}. Starting download task.")
                         logging.info(f"SOCKS5: Recognized incoming connection for sid={sid}, dst_addr={dst_addr}")
                         await self.download_file_task(reader, info, info['peer_jid'], sid, writer=writer)
                         match_found = True
@@ -665,6 +666,7 @@ class FileTransferPlugin(BasePlugin):
                         if not chunk: break
                         await loop.run_in_executor(None, f.write, chunk)
                         received += len(chunk)
+                        logging.debug(f"DOWNLOAD sid={sid}: Received {len(chunk)} bytes. Total: {received}/{file_info['size']}")
                         if sid in self.bot.pending_files: self.bot.pending_files[sid]['timestamp'] = loop.time()
                     except asyncio.TimeoutError:
                         logging.error(f"DOWNLOAD TIMEOUT: sid={sid}, no data for 60s")
