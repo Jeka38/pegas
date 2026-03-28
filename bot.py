@@ -29,14 +29,9 @@ class OBBFastBot(ClientXMPP):
 
         # Initialize core features via plugins
         self.register_plugin('xep_0030')
-        self.register_plugin('xep_0047')
-        self['xep_0047'].auto_accept = True
-        self['xep_0047'].block_size = 32768
-        self['xep_0047'].max_block_size = 65536
         self.register_plugin('xep_0199')
         self['xep_0199'].send_keepalive = True
         self['xep_0199'].interval = 60
-        self.register_plugin('xep_0065')
         self.register_plugin('xep_0092')
         self['xep_0092'].software_name = APP_NAME
 
@@ -179,6 +174,7 @@ class OBBFastBot(ClientXMPP):
             "mv <номер|путь> <номер|путь> - переместить/переименовать.\n"
             "rm <номер>[,<номер>],.. - удаление файлов по номеру или rm * - для удаления всех файлов.\n"
             "link <номер>[,<номер>],.. - получение ссылок на файлы или lnk * - для всех файлов.\n"
+            "get <номер|путь> - скачать файл через XMPP (Jingle).\n"
             "priv - сделать архив приватным (создать index.html).\n"
             "pub - сделать архив публичным (удалить index.html).\n"
             "album - включить режим галереи (создать index.php).\n"

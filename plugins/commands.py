@@ -209,6 +209,15 @@ class CommandsPlugin(BasePlugin):
                         except ValueError: idx = -1
                         res.append(f"{idx+1 if idx >=0 else '?'} - {self.bot.base_url}/{user_hash}/{safe_quote(rel)}")
                 if res: self.reply(msg, "\n".join(res))
+        elif cmd == 'get' and len(parts) == 2:
+            cmd_executed = True
+            items = get_all_items(user_dir)
+            target = resolve_item(user_dir, parts[1], items)
+            if target and os.path.isfile(target):
+                self.reply(msg, f"🚀 Начинаю отправку файла: {os.path.basename(target)}")
+                asyncio.create_task(self.bot.file_transfer.send_file(msg['from'], target))
+            else:
+                self.reply(msg, "❌ Файл не найден")
         elif cmd == 'rm' and 2 <= len(parts) <= 3:
             cmd_executed = True
             items = get_all_items(user_dir)
