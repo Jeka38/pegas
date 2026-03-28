@@ -140,6 +140,9 @@ class FileTransferPlugin(BasePlugin):
         self.bot.register_handler(
             handler.Callback('OOB', matcher.MatchXPath('{jabber:client}iq/{jabber:iq:oob}query'), self.handle_iq_oob)
         )
+        self.bot.register_handler(
+            handler.Callback('IBB Block', matcher.MatchXPath('{jabber:client}iq/{http://jabber.org/protocol/ibb}open'), self.handle_ibb_block)
+        )
 
         # Запускаем собственный SOCKS5 сервер
         asyncio.create_task(asyncio.start_server(self._handle_socks5_client, '0.0.0.0', SOCKS5_PORT))
@@ -466,25 +469,20 @@ class FileTransferPlugin(BasePlugin):
                 # Transport Selection Logic
                 s5b_ns = 'urn:xmpp:jingle:transports:s5b:1'
                 ice_ns = 'urn:xmpp:jingle:transports:ice-udp:1'
-                ibb_ns = 'urn:xmpp:jingle:transports:ibb:1'
 
                 s5b_t = content.find(f'{{{s5b_ns}}}transport')
                 ice_t = content.find(f'{{{ice_ns}}}transport')
-                ibb_t = content.find(f'{{{ibb_ns}}}transport')
 
                 chosen_transport_el = None
                 transport_type = None
 
-                # Priority: ICE-UDP > S5B > IBB
+                # Priority: ICE-UDP > S5B
                 if ice_t is not None and HAS_WEBRTC:
                     chosen_transport_el = ice_t
                     transport_type = 'ice-udp'
                 elif s5b_t is not None:
                     chosen_transport_el = s5b_t
                     transport_type = 's5b'
-                elif ibb_t is not None:
-                    chosen_transport_el = ibb_t
-                    transport_type = 'ibb'
 
                 if chosen_transport_el is None:
                     logging.warning(f"JINGLE: No supported transport offered by {iq['from']}")
@@ -569,8 +567,6 @@ class FileTransferPlugin(BasePlugin):
                                 'priority': '65536',
                                 'type': 'proxy'
                             })
-                    elif transport_type == 'ibb':
-                        pass
 
                     accept_iq.append(res_j)
                     self.send_iq(accept_iq)
@@ -605,13 +601,27 @@ class FileTransferPlugin(BasePlugin):
 
                 self.send_iq(iq.reply())
             elif action == 'transport-replace':
+                self.send_iq(iq.reply())
                 content = jingle.find('{urn:xmpp:jingle:1}content')
                 if content is not None:
                     s5b_t = content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
-                    if s5b_t is not None:
-                        # Handle S5B transport replace (e.g. from ICE-UDP or other)
-                        pass
-                self.send_iq(iq.reply())
+                    ice_t = content.find('{urn:xmpp:jingle:transports:ice-udp:1}transport')
+
+                    if s5b_t is not None or (ice_t is not None and HAS_WEBRTC):
+                        # Accept S5B or ICE replacement
+                        accept_iq = self.bot.make_iq_set(ito=iq['from'])
+                        res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'transport-accept', 'sid': sid, 'initiator': iq['from'].full})
+                        res_c = ET.SubElement(res_j, '{urn:xmpp:jingle:1}content', {'creator': content.get('creator'), 'name': content.get('name')})
+                        res_c.append(copy.deepcopy(s5b_t if s5b_t is not None else ice_t))
+                        accept_iq.append(res_j); self.send_iq(accept_iq)
+
+                        if s5b_t is not None:
+                             asyncio.create_task(self._socks5_connect_and_save(iq, jingle_sid=sid))
+                    else:
+                        # Reject IBB or other unknown transport replacement
+                        reject_iq = self.bot.make_iq_set(ito=iq['from'])
+                        res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'transport-reject', 'sid': sid, 'initiator': iq['from'].full})
+                        reject_iq.append(res_j); self.send_iq(reject_iq)
             elif action == 'transport-accept':
                 self.send_iq(iq.reply())
             elif action == 'session-terminate':
@@ -775,6 +785,10 @@ class FileTransferPlugin(BasePlugin):
                     logging.info(f"S5B: Manually discovered proxy {jid} at {sh.get('host')}:{sh.get('port')}")
         except Exception as e:
             logging.debug(f"S5B: Failed to get streamhost info from {jid}: {e}")
+
+    def handle_ibb_block(self, iq):
+        logging.info(f"IBB: Blocking request from {iq['from']}")
+        self.send_iq(iq.error('feature-not-implemented'))
 
     async def send_file(self, peer_jid, filepath):
         if not os.path.exists(filepath):
