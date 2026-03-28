@@ -13,10 +13,11 @@ async def test_proxy_discovery():
     bot.__getitem__.side_effect = lambda key: xep_0065 if key == 'xep_0065' else MagicMock()
 
     # Configure mock behavior
-    xep_0065.discover_proxies.return_value = ['proxy1@server.com', 'proxy2@server.com']
+    xep_0065.discover_proxies.return_value = ['proxy1@server.com', 'proxy2@server.com', 'proxy_bad@server.com']
     xep_0065.get_network_address.side_effect = [
         {'host': '1.1.1.1', 'port': '1080'},
-        {'host': '2.2.2.2', 'port': '1081'}
+        {'host': '2.2.2.2', 'port': '1081'},
+        {'host': '3.3.3.3', 'port': ''}  # Test empty port
     ]
 
     # Initialize plugin

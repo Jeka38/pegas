@@ -687,7 +687,7 @@ class FileTransferPlugin(BasePlugin):
                 for jid in proxy_jids:
                     try:
                         info = await self.bot['xep_0065'].get_network_address(jid)
-                        if info:
+                        if info and info.get('host') and info.get('port'):
                             self.proxies[jid] = {
                                 'host': info['host'],
                                 'port': int(info['port'])
