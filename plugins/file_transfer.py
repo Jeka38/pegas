@@ -9,7 +9,7 @@ import base64
 import ipaddress
 import urllib.parse
 from slixmpp.xmlstream import ET, matcher, handler
-from config import ADMIN_JID, QUOTA_LIMIT_BYTES, SOCKS5_PORT, SOCKS5_IP
+from config import ADMIN_JID, QUOTA_LIMIT_BYTES
 from utils import get_dir_size, safe_quote, get_unique_path
 from .base import BasePlugin
 
@@ -49,7 +49,7 @@ class FileTransferPlugin(BasePlugin):
         self.bot.add_event_handler("ibb_stream_start", self.handle_ibb_stream)
 
         # SOCKS5 Server
-        asyncio.create_task(asyncio.start_server(self._handle_socks5_client, '0.0.0.0', SOCKS5_PORT))
+        asyncio.create_task(asyncio.start_server(self._handle_socks5_client, '0.0.0.0', 1080))
         
         # IBB Filter
         self.bot.add_filter('in', self._intercept_ibb_messages)
@@ -326,9 +326,7 @@ class FileTransferPlugin(BasePlugin):
 
     def _add_s5b_candidates(self, res_t):
         local_ip = self.get_local_ip()
-        ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=local_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='local', priority='8253074', type='host')
-        if SOCKS5_IP and SOCKS5_IP != local_ip:
-            ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=SOCKS5_IP, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='public', priority='8252818', type='host')
+        ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=local_ip, port='1080', jid=self.bot.boundjid.full, cid='local', priority='8253074', type='host')
         for p in ['proxy.eu.jabber.network', 'proxy.jabber.ru']:
             ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=p, port='1080', jid=p, cid=p, priority='65536', type='proxy')
 
@@ -503,9 +501,7 @@ class FileTransferPlugin(BasePlugin):
         reply = iq.reply()
         query = ET.Element('{http://jabber.org/protocol/bytestreams}query', {'sid': sid})
         local_ip = self.get_local_ip()
-        ET.SubElement(query, '{http://jabber.org/protocol/bytestreams}streamhost', host=local_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full)
-        if SOCKS5_IP and SOCKS5_IP != local_ip:
-            ET.SubElement(query, '{http://jabber.org/protocol/bytestreams}streamhost', host=SOCKS5_IP, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full)
+        ET.SubElement(query, '{http://jabber.org/protocol/bytestreams}streamhost', host=local_ip, port='1080', jid=self.bot.boundjid.full)
         for p in ['proxy.eu.jabber.network', 'proxy.jabber.ru']:
             ET.SubElement(query, '{http://jabber.org/protocol/bytestreams}streamhost', host=p, port='1080', jid=p)
         reply.append(query); reply.send()
