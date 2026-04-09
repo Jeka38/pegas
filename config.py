@@ -13,7 +13,6 @@ ADMIN_NOTIFY_LEVEL = os.getenv('ADMIN_NOTIFY_LEVEL', 'all').lower()
 
 # Database and persistence
 DB_PATH = os.getenv('DB_PATH', '/app/data/bot.db')
-WHITELIST_FILE = os.getenv('WHITELIST_FILE', 'whitelist.json')
 
 # Filesystem settings
 MAX_DIR_DEPTH = int(os.getenv('MAX_DIR_DEPTH', 2))
