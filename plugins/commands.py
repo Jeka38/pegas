@@ -154,43 +154,68 @@ class CommandsPlugin(BasePlugin):
                                     self.reply(msg, f"🚚 Перемещено: {os.path.relpath(src, user_dir)} -> {os.path.relpath(final_dst, user_dir)}")
                         except Exception as e: self.reply(msg, f"❌ Ошибка: {e}")
                     else: self.reply(msg, "❌ Файл не найден")
-        elif cmd in ('ls', 'lss', 'lsl') and len(parts) <= 2:
+        elif cmd in ('ls', 'lss', 'lsl'):
             mode = 'links'
-            if cmd == 'lss': mode = 'size'
-            elif cmd == 'lsl': mode = 'long'
-            elif len(parts) == 2:
-                if parts[1] == '-s': mode = 'size'
-                elif parts[1] == '-l': mode = 'long'
-                else: mode = None
-            if mode:
-                cmd_executed = True
-                items = get_all_items(user_dir)
-                used = get_dir_size(user_dir)
-                footer = f"\n\n📊 Квота: {format_size(used)} / {format_size(QUOTA_LIMIT_BYTES)}"
-                footer += f"\n📂 Ваш архив: {self.bot.base_url}/{user_hash}/"
-                if not items:
-                    self.reply(msg, "📁 Папка пуста" + footer)
-                else:
-                    res = ["Список файлов:"]
-                    for i, itm in enumerate(items):
-                        depth = itm.count('/')
-                        if itm.endswith('/'): depth -= 1
-                        name = os.path.basename(itm.rstrip('/'))
-                        if itm.endswith('/'): name += "/"
-                        display_itm = ("    " * depth + "└── " + name) if depth > 0 else name
-                        full_path = os.path.join(user_dir, itm)
-                        if mode == 'links': res.append(f"{i+1} - {display_itm}")
-                        elif mode == 'size':
-                            if itm.endswith('/'): res.append(f"{i+1} - {display_itm} [директория]")
-                            else: res.append(f"{i+1} - {display_itm} [{format_size(os.path.getsize(full_path))}]")
-                        elif mode == 'long':
-                            st = os.stat(full_path)
-                            size, mtime = format_size(st.st_size), datetime.datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M')
-                            if itm.endswith('/'):
-                                res.append(f"{i+1} - {display_itm} [директория, {mtime}]")
-                            else:
-                                res.append(f"{i+1} - {display_itm} [{size}, загружен {mtime}]")
+            filter_arg = None
+            if cmd == 'lss':
+                mode = 'size'
+                if len(parts) > 1: filter_arg = ",".join(parts[1:])
+            elif cmd == 'lsl':
+                mode = 'long'
+                if len(parts) > 1: filter_arg = ",".join(parts[1:])
+            else: # cmd == 'ls'
+                if len(parts) > 1:
+                    if parts[1] == '-s':
+                        mode = 'size'
+                        if len(parts) > 2: filter_arg = ",".join(parts[2:])
+                    elif parts[1] == '-l':
+                        mode = 'long'
+                        if len(parts) > 2: filter_arg = ",".join(parts[2:])
+                    else:
+                        filter_arg = ",".join(parts[1:])
 
+            cmd_executed = True
+            items = get_all_items(user_dir)
+            used = get_dir_size(user_dir)
+            footer = f"\n\n📊 Квота: {format_size(used)} / {format_size(QUOTA_LIMIT_BYTES)}"
+            footer += f"\n📂 Ваш архив: {self.bot.base_url}/{user_hash}/"
+
+            if not items:
+                self.reply(msg, "📁 Папка пуста" + footer)
+            else:
+                filtered_paths = None
+                if filter_arg:
+                    filtered_paths = resolve_items_list(user_dir, filter_arg, items)
+
+                res = ["Список файлов:"]
+                found = False
+                for i, itm in enumerate(items):
+                    full_path = os.path.join(user_dir, itm)
+                    if filtered_paths is not None and full_path not in filtered_paths:
+                        continue
+
+                    found = True
+                    depth = itm.count('/')
+                    if itm.endswith('/'): depth -= 1
+                    name = os.path.basename(itm.rstrip('/'))
+                    if itm.endswith('/'): name += "/"
+                    display_itm = ("    " * depth + "└── " + name) if depth > 0 else name
+
+                    if mode == 'links': res.append(f"{i+1} - {display_itm}")
+                    elif mode == 'size':
+                        if itm.endswith('/'): res.append(f"{i+1} - {display_itm} [директория]")
+                        else: res.append(f"{i+1} - {display_itm} [{format_size(os.path.getsize(full_path))}]")
+                    elif mode == 'long':
+                        st = os.stat(full_path)
+                        size, mtime = format_size(st.st_size), datetime.datetime.fromtimestamp(st.st_mtime).strftime('%Y-%m-%d %H:%M')
+                        if itm.endswith('/'):
+                            res.append(f"{i+1} - {display_itm} [директория, {mtime}]")
+                        else:
+                            res.append(f"{i+1} - {display_itm} [{size}, загружен {mtime}]")
+
+                if not found and filter_arg:
+                    self.reply(msg, f"🔍 По запросу '{filter_arg}' ничего не найдено." + footer)
+                else:
                     self.reply(msg, "\n".join(res) + footer)
         elif cmd in ('link', 'lnk') and len(parts) == 2:
             cmd_executed = True
