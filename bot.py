@@ -111,19 +111,19 @@ class OBBFastBot(ClientXMPP):
             logging.info(f"FINISH: Removed {count} .part files during startup")
 
     def migrate_json_to_db(self):
-        from config import WHITELIST_FILE
+        whitelist_file = os.getenv('WHITELIST_FILE', 'whitelist.json')
         try:
-            if os.path.exists(WHITELIST_FILE):
-                if os.path.isfile(WHITELIST_FILE):
+            if os.path.exists(whitelist_file):
+                if os.path.isfile(whitelist_file):
                     import json
-                    with open(WHITELIST_FILE, 'r') as f:
+                    with open(whitelist_file, 'r') as f:
                         data = json.load(f)
                         for entry in data:
                             self.db.add_to_whitelist(entry)
-                    logging.info(f"MIGRATED {len(data)} entries from {WHITELIST_FILE} to database")
-                    os.remove(WHITELIST_FILE)
-                elif os.path.isdir(WHITELIST_FILE):
-                    os.rmdir(WHITELIST_FILE)
+                    logging.info(f"MIGRATED {len(data)} entries from {whitelist_file} to database")
+                    os.remove(whitelist_file)
+                elif os.path.isdir(whitelist_file):
+                    os.rmdir(whitelist_file)
         except Exception as e:
             logging.error(f"MIGRATION ERROR: {e}")
 
@@ -171,8 +171,8 @@ class OBBFastBot(ClientXMPP):
     def get_help_text(self, is_admin=False, user_hash=None):
         text = (
             "команды:\n"
-            "ls - список файлов и каталогов в папке пользователя.\n"
-            "ls <-s|-l>, lss, lsl - список файлов (-s: размер, -l: подробно). Пример: ls -l\n"
+            "ls [фильтр] - список файлов и каталогов в папке пользователя.\n"
+            "ls <-s|-l> [фильтр], lss [фильтр], lsl [фильтр] - список файлов (-s: размер, -l: подробно). Примеры: ls -l, lss 1, ls *.jpg\n"
             "mkdir <путь> - создать директорию.\n"
             "rmdir <номер|путь> - удалить пустую директорию.\n"
             "mv <номер|путь> <номер|путь> - переместить/переименовать.\n"
