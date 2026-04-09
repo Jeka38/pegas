@@ -174,6 +174,7 @@ class FileTransferPlugin(BasePlugin):
         if not fname or fname == os.path.basename(url):
             fname = os.path.basename(parsed_url.path) if parsed_url.path.strip('/') else "downloaded_file"
 
+        fname = fname.lower()
         from utils import is_php_file
         if is_php_file(fname):
             self.bot.send_message(mto=peer_jid, mbody=f"⚠️ Ошибка: Загрузка PHP-файлов запрещена ({fname})", mtype='chat')
@@ -272,7 +273,7 @@ class FileTransferPlugin(BasePlugin):
         name_tag, size_tag = file_tag.find(f'{{{ft_ns}}}name'), file_tag.find(f'{{{ft_ns}}}size')
         if name_tag is None or size_tag is None: return iq.reply().send()
 
-        fname = os.path.basename(name_tag.text or "file").replace(' ', '_')
+        fname = os.path.basename(name_tag.text or "file").replace(' ', '_').lower()
         from utils import is_php_file
         if is_php_file(fname):
             self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Ошибка: Загрузка PHP запрещена.", mtype='chat')
@@ -371,7 +372,8 @@ class FileTransferPlugin(BasePlugin):
         si = iq.xml.find('{http://jabber.org/protocol/si}si')
         sid = si.get('id')
         file_tag = si.find('{http://jabber.org/protocol/si/profile/file-transfer}file')
-        fname, fsize = os.path.basename(file_tag.get('name') or "file").replace(' ', '_'), int(file_tag.get('size', 0))
+        fname = os.path.basename(file_tag.get('name') or "file").replace(' ', '_').lower()
+        fsize = int(file_tag.get('size', 0))
 
         from utils import is_php_file
         if is_php_file(fname): iq.error('not-acceptable').send(); return
