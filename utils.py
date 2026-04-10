@@ -1,6 +1,7 @@
 import os
 import urllib.parse
 import fnmatch
+import re
 from config import MAX_DIR_DEPTH
 
 def format_size(size):
@@ -76,14 +77,15 @@ def resolve_items_list(user_dir, arg, items):
             if '/' not in p:
                 for itm in items:
                     name = os.path.basename(itm.rstrip('/'))
-                    if fnmatch.fnmatch(name, p):
+                    if fnmatch.fnmatch(name.lower(), p.lower()):
                         path = get_safe_path(user_dir, itm)
                         if path: resolved.append(path)
             else:
-                matches = fnmatch.filter(items, p)
-                for m in matches:
-                    path = get_safe_path(user_dir, m)
-                    if path: resolved.append(path)
+                regex = re.compile(fnmatch.translate(p), re.IGNORECASE)
+                for m in items:
+                    if regex.match(m):
+                        path = get_safe_path(user_dir, m)
+                        if path: resolved.append(path)
         else:
             path = resolve_item(user_dir, p, items)
             if path: resolved.append(path)
