@@ -355,140 +355,19 @@ class FileTransferPlugin(BasePlugin):
         try:
             if iq['type'] in ('error', 'result'): return
             jingle = iq.xml.find('{urn:xmpp:jingle:1}jingle')
-            if jingle is None:
-                return iq.reply().send()
+            if jingle is None: return iq.reply().send()
+
             action, sid = jingle.get('action'), jingle.get('sid')
             logging.info(f"JINGLE EVENT: action={action}, sid={sid}, from={iq['from']}")
+
             if action == 'session-initiate':
-                if not self.bot.is_allowed(iq['from']):
-                    logging.warning(f"JINGLE access denied for {iq['from']}")
-                    self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Доступ запрещён. Пожалуйста, обратитесь к администратору для получения доступа: {ADMIN_JID}", mtype='chat')
-                    iq.error('not-allowed').send()
-                    return
-                content = jingle.find('{urn:xmpp:jingle:1}content')
-                if content is None: return iq.reply().send()
-                ft_ns = 'urn:xmpp:jingle:apps:file-transfer:5'
-                description = content.find(f'{{{ft_ns}}}description')
-                if description is None:
-                    ft_ns = 'urn:xmpp:jingle:apps:file-transfer:4'; description = content.find(f'{{{ft_ns}}}description')
-                if description is None: return iq.reply().send()
-                file_tag = description.find(f'{{{ft_ns}}}file')
-                if file_tag is None: return iq.reply().send()
-                name_tag, size_tag = file_tag.find(f'{{{ft_ns}}}name'), file_tag.find(f'{{{ft_ns}}}size')
-                if name_tag is None or size_tag is None: return iq.reply().send()
-
-                fname = os.path.basename(name_tag.text or "file").replace(' ', '_')
-                from utils import is_php_file
-                if is_php_file(fname):
-                    self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Ошибка: Загрузка PHP-файлов запрещена ({fname})", mtype='chat')
-                    iq.error('not-acceptable').send()
-                    return
-                try: fsize = int(size_tag.text or 0)
-                except: fsize = 0
-                user_dir, _ = self.bot.get_user_info(iq['from'])
-                if get_dir_size(user_dir) + fsize > QUOTA_LIMIT_BYTES:
-                    iq.error('not-acceptable').send()
-                    return
-
-                ibb_t, s5b_t = content.find('{urn:xmpp:jingle:transports:ibb:1}transport'), content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
-                if s5b_t is not None and s5b_t.get('sid'): transport_sid = s5b_t.get('sid')
-                elif ibb_t is not None and ibb_t.get('sid'): transport_sid = ibb_t.get('sid')
-                else: transport_sid = sid
-
-                self.bot.pending_files[sid] = {
-                    'name': fname, 'size': fsize, 'timestamp': asyncio.get_event_loop().time(),
-                    'peer_jid': iq['from'], 'ibb_allowed': True,
-                    'content_name': content.get('name'), 'content_creator': content.get('creator'),
-                    'ft_ns': ft_ns, 'transport_sid': transport_sid, 's5b_connecting': False,
-                    'ibb_stanzas': ibb_t.get('stanzas') if ibb_t is not None else None,
-                    'session_sid': sid, 'downloading': False
-                }
-                if transport_sid != sid: self.bot.pending_files[transport_sid] = self.bot.pending_files[sid]
-                iq.reply().send()
-
-                thumb_tag = file_tag.find('{urn:xmpp:thumbs:1}thumbnail')
-                if thumb_tag is not None:
-                    uri = thumb_tag.get('uri')
-                    if uri and uri.startswith('cid:'):
-                        asyncio.create_task(self.request_bob_data(iq['from'], uri, fname))
-
-                try:
-                    accept_iq = self.bot.make_iq_set(ito=iq['from'])
-                    res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-accept', 'sid': sid, 'initiator': iq['from'].full})
-                    res_c = ET.SubElement(res_j, '{urn:xmpp:jingle:1}content', {'creator': content.get('creator'), 'name': content.get('name')})
-                    res_d = ET.SubElement(res_c, f'{{{ft_ns}}}description')
-                    res_f = ET.SubElement(res_d, f'{{{ft_ns}}}file')
-                    ET.SubElement(res_f, f'{{{ft_ns}}}name').text = fname
-                    ET.SubElement(res_f, f'{{{ft_ns}}}size').text = str(fsize)
-
-                    if s5b_t is not None:
-                        res_t = ET.SubElement(res_c, '{urn:xmpp:jingle:transports:s5b:1}transport', {'sid': transport_sid, 'mode': 'tcp'})
-                        local_ip = self.get_local_ip()
-                        ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=local_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-local', priority='8253074', type='host')
-                        if SOCKS5_IP and SOCKS5_IP != local_ip:
-                            ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=SOCKS5_IP, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-public', priority='8252818', type='host')
-                        for p in SOCKS5_PROXIES:
-                            ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=p['host'], port=str(p['port']), jid=p['jid'], cid=hashlib.md5(p['jid'].encode()).hexdigest(), priority='65536', type='proxy')
-                    elif ibb_t is not None:
-                        b_size = int(ibb_t.get('block-size', '32768'))
-                        use_msg = ibb_t.get('stanzas') == 'message' or True
-                        ibb_attrs = {'block-size': str(b_size), 'sid': transport_sid}
-                        if use_msg: ibb_attrs['stanzas'] = 'message'
-                        ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ibb:1}transport', ibb_attrs)
-                        from slixmpp.plugins.xep_0047 import IBBytestream
-                        stream = IBBytestream(self.bot, transport_sid, b_size, self.bot.boundjid, iq['from'], use_msg)
-                        self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, transport_sid, iq['from'], stream)
-                        self.bot.event('ibb_stream_start', stream)
-                    else:
-                        ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ibb:1}transport', {'block-size': '32768', 'sid': sid, 'stanzas': 'message'})
-                        from slixmpp.plugins.xep_0047 import IBBytestream
-                        stream = IBBytestream(self.bot, sid, 32768, self.bot.boundjid, iq['from'], True)
-                        self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, sid, iq['from'], stream)
-                        self.bot.event('ibb_stream_start', stream)
-
-                    accept_iq.append(res_j)
-                    accept_iq.send()
-                    if s5b_t is not None and s5b_t.findall('{urn:xmpp:jingle:transports:s5b:1}candidate'):
-                        self.bot.pending_files[sid]['s5b_connecting'] = True
-                        self.bot.pending_files[f"jingle_s5b_{sid}"] = asyncio.create_task(self._socks5_connect_and_save(iq, jingle_sid=sid))
-                except Exception as e: logging.error(f"JINGLE ACCEPT ERROR: {e}")
+                self._handle_jingle_initiate(iq, jingle)
             elif action == 'transport-info':
-                content = jingle.find('{urn:xmpp:jingle:1}content')
-                if content is not None:
-                    transport = content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
-                    if transport is not None and not self.bot.pending_files.get(sid, {}).get('s5b_connecting'):
-                        self.bot.pending_files[sid]['s5b_connecting'] = True
-                        self.bot.pending_files[f"jingle_s5b_info_{sid}"] = asyncio.create_task(self._socks5_connect_and_save(iq, jingle_sid=sid))
-                iq.reply().send()
+                self._handle_jingle_transport_info(iq, jingle)
             elif action == 'transport-replace':
-                content = jingle.find('{urn:xmpp:jingle:1}content')
-                if content is not None:
-                    ibb_t = content.find('{urn:xmpp:jingle:transports:ibb:1}transport')
-                    if ibb_t is not None:
-                        if sid in self.bot.pending_files:
-                            ibb_sid = ibb_t.get('sid')
-                            self.bot.pending_files[sid]['transport_sid'] = ibb_sid
-                            self.bot.pending_files[sid]['ibb_stanzas'] = ibb_t.get('stanzas')
-                            self.bot.pending_files[ibb_sid] = self.bot.pending_files[sid]
-                            reply = self.bot.make_iq_set(ito=iq['from'])
-                            res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'transport-accept', 'sid': sid, 'initiator': iq['from'].full})
-                            res_c = ET.SubElement(res_j, '{urn:xmpp:jingle:1}content', {'creator': content.get('creator'), 'name': content.get('name')})
-                            ibb_attrs = {'sid': ibb_sid, 'block-size': '32768', 'stanzas': 'message'}
-                            ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ibb:1}transport', ibb_attrs)
-                            from slixmpp.plugins.xep_0047 import IBBytestream
-                            stream = IBBytestream(self.bot, ibb_sid, 32768, self.bot.boundjid, iq['from'], True)
-                            self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, ibb_sid, iq['from'], stream)
-                            self.bot.event('ibb_stream_start', stream)
-                            reply.append(res_j); reply.send()
-                iq.reply().send()
-            elif action == 'transport-accept':
-                iq.reply().send()
+                self._handle_jingle_transport_replace(iq, jingle)
             elif action == 'session-terminate':
-                task_key = f"task_{sid}"
-                if task_key in self.bot.pending_files:
-                    task = self.bot.pending_files[task_key]
-                    if isinstance(task, asyncio.Task) and not task.done(): task.cancel()
-                if sid in self.bot.pending_files: del self.bot.pending_files[sid]
+                self._handle_jingle_terminate(sid)
                 iq.reply().send()
             else:
                 iq.reply().send()
@@ -496,6 +375,147 @@ class FileTransferPlugin(BasePlugin):
             logging.error(f"JINGLE IQ ERROR: {e}")
             try: iq.error('internal-server-error').send()
             except: pass
+
+    def _handle_jingle_initiate(self, iq, jingle):
+        sid = jingle.get('sid')
+        if not self.bot.is_allowed(iq['from']):
+            logging.warning(f"JINGLE access denied for {iq['from']}")
+            self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Доступ запрещён. Пожалуйста, обратитесь к администратору для получения доступа: {ADMIN_JID}", mtype='chat')
+            iq.error('not-allowed').send()
+            return
+
+        content = jingle.find('{urn:xmpp:jingle:1}content')
+        if content is None: return iq.reply().send()
+
+        ft_ns = 'urn:xmpp:jingle:apps:file-transfer:5'
+        description = content.find(f'{{{ft_ns}}}description')
+        if description is None:
+            ft_ns = 'urn:xmpp:jingle:apps:file-transfer:4'
+            description = content.find(f'{{{ft_ns}}}description')
+        if description is None: return iq.reply().send()
+
+        file_tag = description.find(f'{{{ft_ns}}}file')
+        if file_tag is None: return iq.reply().send()
+
+        name_tag, size_tag = file_tag.find(f'{{{ft_ns}}}name'), file_tag.find(f'{{{ft_ns}}}size')
+        if name_tag is None or size_tag is None: return iq.reply().send()
+
+        fname = os.path.basename(name_tag.text or "file").replace(' ', '_')
+        from utils import is_php_file
+        if is_php_file(fname):
+            self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Ошибка: Загрузка PHP-файлов запрещена ({fname})", mtype='chat')
+            iq.error('not-acceptable').send()
+            return
+
+        try: fsize = int(size_tag.text or 0)
+        except: fsize = 0
+
+        user_dir, _ = self.bot.get_user_info(iq['from'])
+        if get_dir_size(user_dir) + fsize > QUOTA_LIMIT_BYTES:
+            iq.error('not-acceptable').send()
+            return
+
+        ibb_t = content.find('{urn:xmpp:jingle:transports:ibb:1}transport')
+        s5b_t = content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
+        transport_sid = s5b_t.get('sid') if s5b_t is not None else (ibb_t.get('sid') if ibb_t is not None else sid)
+
+        self.bot.pending_files[sid] = {
+            'name': fname, 'size': fsize, 'timestamp': asyncio.get_event_loop().time(),
+            'peer_jid': iq['from'], 'ibb_allowed': True,
+            'content_name': content.get('name'), 'content_creator': content.get('creator'),
+            'ft_ns': ft_ns, 'transport_sid': transport_sid, 's5b_connecting': False,
+            'ibb_stanzas': ibb_t.get('stanzas') if ibb_t is not None else None,
+            'session_sid': sid, 'downloading': False
+        }
+        if transport_sid != sid: self.bot.pending_files[transport_sid] = self.bot.pending_files[sid]
+        iq.reply().send()
+
+        thumb_tag = file_tag.find('{urn:xmpp:thumbs:1}thumbnail')
+        if thumb_tag is not None:
+            uri = thumb_tag.get('uri')
+            if uri and uri.startswith('cid:'):
+                asyncio.create_task(self.request_bob_data(iq['from'], uri, fname))
+
+        self._send_jingle_accept(iq, sid, fname, fsize, ft_ns, transport_sid, s5b_t, ibb_t, content)
+
+    def _send_jingle_accept(self, iq, sid, fname, fsize, ft_ns, transport_sid, s5b_t, ibb_t, content):
+        try:
+            accept_iq = self.bot.make_iq_set(ito=iq['from'])
+            res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'session-accept', 'sid': sid, 'initiator': iq['from'].full})
+            res_c = ET.SubElement(res_j, '{urn:xmpp:jingle:1}content', {'creator': content.get('creator'), 'name': content.get('name')})
+            res_d = ET.SubElement(res_c, f'{{{ft_ns}}}description')
+            res_f = ET.SubElement(res_d, f'{{{ft_ns}}}file')
+            ET.SubElement(res_f, f'{{{ft_ns}}}name').text = fname
+            ET.SubElement(res_f, f'{{{ft_ns}}}size').text = str(fsize)
+
+            if s5b_t is not None:
+                res_t = ET.SubElement(res_c, '{urn:xmpp:jingle:transports:s5b:1}transport', {'sid': transport_sid, 'mode': 'tcp'})
+                local_ip = self.get_local_ip()
+                ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=local_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-local', priority='8253074', type='host')
+                if SOCKS5_IP and SOCKS5_IP != local_ip:
+                    ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=SOCKS5_IP, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-public', priority='8252818', type='host')
+                for p in SOCKS5_PROXIES:
+                    ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=p['host'], port=str(p['port']), jid=p['jid'], cid=hashlib.md5(p['jid'].encode()).hexdigest(), priority='65536', type='proxy')
+            else:
+                b_size = int(ibb_t.get('block-size', '32768')) if ibb_t is not None else 32768
+                use_msg = (ibb_t.get('stanzas') == 'message') if ibb_t is not None else True
+                ibb_attrs = {'block-size': str(b_size), 'sid': transport_sid}
+                if use_msg: ibb_attrs['stanzas'] = 'message'
+                ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ibb:1}transport', ibb_attrs)
+                from slixmpp.plugins.xep_0047 import IBBytestream
+                stream = IBBytestream(self.bot, transport_sid, b_size, self.bot.boundjid, iq['from'], use_msg)
+                self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, transport_sid, iq['from'], stream)
+                self.bot.event('ibb_stream_start', stream)
+
+            accept_iq.append(res_j)
+            accept_iq.send()
+            if s5b_t is not None and s5b_t.findall('{urn:xmpp:jingle:transports:s5b:1}candidate'):
+                self.bot.pending_files[sid]['s5b_connecting'] = True
+                self.bot.pending_files[f"jingle_s5b_{sid}"] = asyncio.create_task(self._socks5_connect_and_save(iq, jingle_sid=sid))
+        except Exception as e:
+            logging.error(f"JINGLE ACCEPT ERROR: {e}")
+
+    def _handle_jingle_transport_info(self, iq, jingle):
+        sid = jingle.get('sid')
+        content = jingle.find('{urn:xmpp:jingle:1}content')
+        if content is not None:
+            transport = content.find('{urn:xmpp:jingle:transports:s5b:1}transport')
+            if transport is not None and sid in self.bot.pending_files:
+                if not self.bot.pending_files[sid].get('s5b_connecting'):
+                    self.bot.pending_files[sid]['s5b_connecting'] = True
+                    self.bot.pending_files[f"jingle_s5b_info_{sid}"] = asyncio.create_task(self._socks5_connect_and_save(iq, jingle_sid=sid))
+        iq.reply().send()
+
+    def _handle_jingle_transport_replace(self, iq, jingle):
+        sid = jingle.get('sid')
+        content = jingle.find('{urn:xmpp:jingle:1}content')
+        if content is not None:
+            ibb_t = content.find('{urn:xmpp:jingle:transports:ibb:1}transport')
+            if ibb_t is not None and sid in self.bot.pending_files:
+                ibb_sid = ibb_t.get('sid')
+                self.bot.pending_files[sid]['transport_sid'] = ibb_sid
+                self.bot.pending_files[sid]['ibb_stanzas'] = ibb_t.get('stanzas')
+                self.bot.pending_files[ibb_sid] = self.bot.pending_files[sid]
+
+                reply = self.bot.make_iq_set(ito=iq['from'])
+                res_j = ET.Element('{urn:xmpp:jingle:1}jingle', {'action': 'transport-accept', 'sid': sid, 'initiator': iq['from'].full})
+                res_c = ET.SubElement(res_j, '{urn:xmpp:jingle:1}content', {'creator': content.get('creator'), 'name': content.get('name')})
+                ibb_attrs = {'sid': ibb_sid, 'block-size': '32768', 'stanzas': 'message'}
+                ET.SubElement(res_c, '{urn:xmpp:jingle:transports:ibb:1}transport', ibb_attrs)
+
+                from slixmpp.plugins.xep_0047 import IBBytestream
+                stream = IBBytestream(self.bot, ibb_sid, 32768, self.bot.boundjid, iq['from'], True)
+                self.bot['xep_0047'].api['set_stream'](self.bot.boundjid, ibb_sid, iq['from'], stream)
+                self.bot.event('ibb_stream_start', stream)
+                reply.append(res_j); reply.send()
+        iq.reply().send()
+
+    def _handle_jingle_terminate(self, sid):
+        task_key = f"task_{sid}"
+        if task_key in self.bot.pending_files:
+            task = self.bot.pending_files[task_key]
+            if isinstance(task, asyncio.Task) and not task.done(): task.cancel()
+        if sid in self.bot.pending_files: del self.bot.pending_files[sid]
 
     def handle_raw_si(self, iq):
         if iq['type'] in ('error', 'result'): return
@@ -506,48 +526,65 @@ class FileTransferPlugin(BasePlugin):
             return
         try:
             si = iq.xml.find('{http://jabber.org/protocol/si}si')
-            sid, tag = si.get('id'), si.find('{http://jabber.org/protocol/si/profile/file-transfer}file')
+            sid = si.get('id')
+            tag = si.find('{http://jabber.org/protocol/si/profile/file-transfer}file')
+            if tag is None: return iq.error('bad-request').send()
+
             logging.info(f"SI REQUEST: sid={sid}, from={iq['from']}, file={tag.get('name')}, size={tag.get('size')}")
-            fname, fsize = os.path.basename(tag.get('name') or "file").replace(' ', '_'), int(tag.get('size', 0))
+            fname = os.path.basename(tag.get('name') or "file").replace(' ', '_')
+
             from utils import is_php_file
             if is_php_file(fname):
                 self.bot.send_message(mto=iq['from'], mbody=f"⚠️ Ошибка: Загрузка PHP-файлов запрещена ({fname})", mtype='chat')
                 iq.error('not-acceptable').send()
                 return
+
+            fsize = int(tag.get('size', 0))
             user_dir, _ = self.bot.get_user_info(iq['from'])
             if get_dir_size(user_dir) + fsize > QUOTA_LIMIT_BYTES:
                 iq.error('not-acceptable').send()
                 return
-            feature_neg = si.find('{http://jabber.org/protocol/feature-neg}feature')
-            offered_methods = []
-            if feature_neg is not None:
-                x_data = feature_neg.find('{jabber:x:data}x')
-                if x_data is not None:
-                    field = next((f for f in x_data.findall('{jabber:x:data}field') if f.get('var') == 'stream-method'), None)
-                    if field is not None:
-                        offered_methods = [v.text for v in field.findall('{jabber:x:data}value')]
-                        offered_methods.extend([v.text for v in field.findall('{jabber:x:data}option/{jabber:x:data}value')])
+
+            offered_methods = self._get_si_methods(si)
             chosen_method = next((m for m in ['jabber:iq:oob', 'http://jabber.org/protocol/bytestreams', 'http://jabber.org/protocol/ibb'] if m in offered_methods), None)
+
             if not chosen_method:
                 iq.error('bad-request').send()
                 return
+
             self.bot.pending_files[sid] = {
                 'name': fname, 'size': fsize, 'timestamp': asyncio.get_event_loop().time(),
                 'ibb_allowed': 'http://jabber.org/protocol/ibb' in offered_methods,
                 'peer_jid': iq['from'], 'transport_sid': sid, 'downloading': False
             }
-            reply = iq.reply()
-            res_si = ET.Element('{http://jabber.org/protocol/si}si', {'id': sid})
-            feature = ET.SubElement(res_si, '{http://jabber.org/protocol/feature-neg}feature')
-            x = ET.SubElement(feature, '{jabber:x:data}x', type='submit')
-            field = ET.SubElement(x, '{jabber:x:data}field', var='stream-method')
-            ET.SubElement(field, '{jabber:x:data}value').text = chosen_method
-            reply.append(res_si)
-            reply.send()
+
+            self._send_si_reply(iq, sid, chosen_method)
         except Exception as e:
             logging.error(f"SI ERROR: {e}")
             try: iq.error('internal-server-error').send()
             except: pass
+
+    def _get_si_methods(self, si):
+        methods = []
+        feature_neg = si.find('{http://jabber.org/protocol/feature-neg}feature')
+        if feature_neg is not None:
+            x_data = feature_neg.find('{jabber:x:data}x')
+            if x_data is not None:
+                field = next((f for f in x_data.findall('{jabber:x:data}field') if f.get('var') == 'stream-method'), None)
+                if field is not None:
+                    methods = [v.text for v in field.findall('{jabber:x:data}value')]
+                    methods.extend([v.text for v in field.findall('{jabber:x:data}option/{jabber:x:data}value')])
+        return methods
+
+    def _send_si_reply(self, iq, sid, chosen_method):
+        reply = iq.reply()
+        res_si = ET.Element('{http://jabber.org/protocol/si}si', {'id': sid})
+        feature = ET.SubElement(res_si, '{http://jabber.org/protocol/feature-neg}feature')
+        x = ET.SubElement(feature, '{jabber:x:data}x', type='submit')
+        field = ET.SubElement(x, '{jabber:x:data}field', var='stream-method')
+        ET.SubElement(field, '{jabber:x:data}value').text = chosen_method
+        reply.append(res_si)
+        reply.send()
 
     def handle_raw_s5b(self, iq):
         if iq['type'] in ('error', 'result'): return
