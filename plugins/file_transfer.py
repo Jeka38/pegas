@@ -9,7 +9,7 @@ import base64
 import ipaddress
 import urllib.parse
 from slixmpp.xmlstream import ET, matcher, handler
-from config import ADMIN_JID, ADMIN_NOTIFY_LEVEL, QUOTA_LIMIT_BYTES, SOCKS5_PORT, SOCKS5_IP
+from config import ADMIN_JID, ADMIN_NOTIFY_LEVEL, QUOTA_LIMIT_BYTES, SOCKS5_PORT, SOCKS5_IP, SOCKS5_PROXIES
 from utils import get_dir_size, safe_quote, get_unique_path
 from .base import BasePlugin
 
@@ -22,13 +22,6 @@ class FileTransferPlugin(BasePlugin):
             s.close()
             return ip
         except: return '127.0.0.1'
-
-    KNOWN_PROXIES = {
-        'proxy.eu.jabber.network': {'host': 'proxy.eu.jabber.network', 'port': 1080},
-        'proxy.jabber.ru': {'host': 'proxy.jabber.ru', 'port': 1080},
-        'proxy.jabbim.cz': {'host': 'proxy.jabbim.cz', 'port': 1080},
-        'proxy.yax.im': {'host': 'proxy.yax.im', 'port': 1080},
-    }
 
     FT_NAMESPACES = [
         'http://jabber.org/protocol/si',
@@ -434,8 +427,8 @@ class FileTransferPlugin(BasePlugin):
                         ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=local_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-local', priority='8253074', type='host')
                         if SOCKS5_IP and SOCKS5_IP != local_ip:
                             ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=SOCKS5_IP, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full, cid='direct-host-public', priority='8252818', type='host')
-                        for p_host, p_jid in [('proxy.eu.jabber.network', 'proxy.eu.jabber.network'), ('proxy.jabber.ru', 'proxy.jabber.ru')]:
-                            ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=p_host, port='1080', jid=p_jid, cid=hashlib.md5(p_jid.encode()).hexdigest(), priority='65536', type='proxy')
+                        for p in SOCKS5_PROXIES:
+                            ET.SubElement(res_t, '{urn:xmpp:jingle:transports:s5b:1}candidate', host=p['host'], port=str(p['port']), jid=p['jid'], cid=hashlib.md5(p['jid'].encode()).hexdigest(), priority='65536', type='proxy')
                     elif ibb_t is not None:
                         b_size = int(ibb_t.get('block-size', '32768'))
                         use_msg = ibb_t.get('stanzas') == 'message' or True
@@ -582,7 +575,7 @@ class FileTransferPlugin(BasePlugin):
                 sid, peer_full = query.get('sid'), iq['from'].full
                 used = query.find('{http://jabber.org/protocol/bytestreams}streamhost-used')
                 if used is not None:
-                    jid = used.get('jid'); proxy = self.KNOWN_PROXIES.get(jid)
+                    jid = used.get('jid'); proxy = next((p for p in SOCKS5_PROXIES if p['jid'] == jid), None)
                     if proxy: hosts = [ET.Element('streamhost', host=proxy['host'], port=str(proxy['port']), jid=jid)]
                     else: iq.error('item-not-found').send(); return
                 else:
@@ -594,8 +587,8 @@ class FileTransferPlugin(BasePlugin):
                     ET.SubElement(res_q, '{http://jabber.org/protocol/bytestreams}streamhost', host=local_ip, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full)
                     if SOCKS5_IP and SOCKS5_IP != local_ip:
                          ET.SubElement(res_q, '{http://jabber.org/protocol/bytestreams}streamhost', host=SOCKS5_IP, port=str(SOCKS5_PORT), jid=self.bot.boundjid.full)
-                    for p_jid, p_info in self.KNOWN_PROXIES.items():
-                        ET.SubElement(res_q, '{http://jabber.org/protocol/bytestreams}streamhost', host=p_info['host'], port=str(p_info['port']), jid=p_jid)
+                    for p in SOCKS5_PROXIES:
+                        ET.SubElement(res_q, '{http://jabber.org/protocol/bytestreams}streamhost', host=p['host'], port=str(p['port']), jid=p['jid'])
                     reply.append(res_q); reply.send(); return
 
             file_info = self.bot.pending_files.get(sid)
