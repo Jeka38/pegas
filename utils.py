@@ -58,32 +58,45 @@ def get_unique_path(path):
         counter += 1
 
 def resolve_item(user_dir, arg, items):
-    """Разрешение аргумента как индекса или пути"""
+    """Разрешение аргумента как индекса или пути (регистронезависимо)"""
     try:
         idx = int(arg) - 1
         if 0 <= idx < len(items):
             return get_safe_path(user_dir, items[idx])
     except ValueError:
         pass
-    return get_safe_path(user_dir, arg)
+
+    # Сначала пробуем точное совпадение
+    path = get_safe_path(user_dir, arg)
+    if path and os.path.exists(path):
+        return path
+
+    # Ищем регистронезависимо в списке элементов
+    arg_low = arg.lower().strip('/')
+    for itm in items:
+        if itm.lower().strip('/') == arg_low:
+            return get_safe_path(user_dir, itm)
+
+    return path
 
 def resolve_items_list(user_dir, arg, items):
-    """Разрешение списка аргументов (индексы, пути, шаблоны)"""
+    """Разрешение списка аргументов (индексы, пути, шаблоны) регистронезависимо"""
     resolved = []
     parts = [p.strip() for p in arg.split(',') if p.strip()]
     for p in parts:
         if '*' in p or '?' in p:
+            p_low = p.lower()
             if '/' not in p:
                 for itm in items:
                     name = os.path.basename(itm.rstrip('/'))
-                    if fnmatch.fnmatch(name, p):
+                    if fnmatch.fnmatch(name.lower(), p_low):
                         path = get_safe_path(user_dir, itm)
                         if path: resolved.append(path)
             else:
-                matches = fnmatch.filter(items, p)
-                for m in matches:
-                    path = get_safe_path(user_dir, m)
-                    if path: resolved.append(path)
+                for itm in items:
+                    if fnmatch.fnmatch(itm.lower(), p_low):
+                        path = get_safe_path(user_dir, itm)
+                        if path: resolved.append(path)
         else:
             path = resolve_item(user_dir, p, items)
             if path: resolved.append(path)
