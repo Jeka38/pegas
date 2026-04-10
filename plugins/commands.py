@@ -129,7 +129,9 @@ class CommandsPlugin(BasePlugin):
 
     def cmd_mkdir(self, msg, parts, user_dir, user_hash):
         if len(parts) != 2: return False
-        target = get_safe_path(user_dir, parts[1])
+        # Заменяем пробелы в имени новой папки
+        dirname = parts[1].replace(' ', '_')
+        target = get_safe_path(user_dir, dirname)
         if target:
             rel = os.path.relpath(target, user_dir)
             if rel != "." and rel.count(os.sep) >= MAX_DIR_DEPTH:
@@ -156,7 +158,11 @@ class CommandsPlugin(BasePlugin):
     def cmd_mv(self, msg, parts, user_dir, user_hash):
         if len(parts) != 3: return False
         items = get_all_items(user_dir)
-        dst = resolve_item(user_dir, parts[2], items)
+        # Заменяем пробелы в пути назначения, если это не индекс
+        dst_arg = parts[2]
+        if not dst_arg.isdigit():
+            dst_arg = dst_arg.replace(' ', '_')
+        dst = resolve_item(user_dir, dst_arg, items)
         if not dst:
             self.reply(msg, "❌ Недопустимый путь назначения")
             return True
@@ -174,7 +180,7 @@ class CommandsPlugin(BasePlugin):
                 for src in resolved_srcs:
                     if os.path.abspath(src) == os.path.abspath(dst):
                         continue
-                    new_dst = os.path.join(dst, os.path.basename(src.rstrip('/')))
+                    new_dst = os.path.join(dst, os.path.basename(src.rstrip('/')).replace(' ', '_'))
                     from utils import is_php_file
                     if is_php_file(new_dst):
                         self.reply(msg, f"⚠️ Ошибка: Переименование в PHP-файлы запрещено ({os.path.basename(new_dst)})")
@@ -194,7 +200,7 @@ class CommandsPlugin(BasePlugin):
                 try:
                     final_dst = dst
                     if os.path.isdir(dst):
-                        final_dst = os.path.join(dst, os.path.basename(src.rstrip('/')))
+                        final_dst = os.path.join(dst, os.path.basename(src.rstrip('/')).replace(' ', '_'))
                     else:
                         if os.path.isfile(src):
                             _, original_ext = os.path.splitext(src)
