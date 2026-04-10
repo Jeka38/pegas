@@ -13,7 +13,6 @@ ADMIN_NOTIFY_LEVEL = os.getenv('ADMIN_NOTIFY_LEVEL', 'all').lower()
 
 # Database and persistence
 DB_PATH = os.getenv('DB_PATH', '/app/data/bot.db')
-WHITELIST_FILE = os.getenv('WHITELIST_FILE', 'whitelist.json')
 
 # Filesystem settings
 MAX_DIR_DEPTH = int(os.getenv('MAX_DIR_DEPTH', 2))
@@ -35,3 +34,11 @@ APP_NAME = os.getenv('APP_NAME', 'OBBFastBot')
 VERSION = os.getenv('APP_VERSION', '1.1')
 STATUS_MESSAGE = os.getenv('STATUS_MESSAGE', 'Для помощи по боту напиши ? или help')
 BASE_URL = (os.getenv('BASE_URL') or "").rstrip('/')
+
+# SOCKS5 Proxies for file transfer
+SOCKS5_PROXIES = [
+    {'host': 'proxy.eu.jabber.network', 'port': 1080, 'jid': 'proxy.eu.jabber.network'},
+    {'host': 'proxy.jabber.ru', 'port': 1080, 'jid': 'proxy.jabber.ru'},
+    {'host': 'proxy.jabbim.cz', 'port': 1080, 'jid': 'proxy.jabbim.cz'},
+    {'host': 'proxy.yax.im', 'port': 1080, 'jid': 'proxy.yax.im'},
+]
