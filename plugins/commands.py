@@ -120,24 +120,33 @@ class CommandsPlugin(BasePlugin):
         return True
 
     def cmd_mkdir(self, msg, parts, user_dir, user_hash):
-        if len(parts) != 2: return False
-        # Sanitize name: replace spaces with underscores
-        folder_name = parts[1].replace(' ', '_')
-        target = get_safe_path(user_dir, folder_name)
-        if target:
-            rel = os.path.relpath(target, user_dir)
-            if rel != "." and rel.count(os.sep) >= MAX_DIR_DEPTH:
-                self.reply(msg, f"❌ Ошибка: Максимальная глубина вложенности — {MAX_DIR_DEPTH} уровня")
-            else:
-                try: os.makedirs(target, exist_ok=True); self.reply(msg, f"📁 Директория создана: {rel}")
-                except Exception as e: self.reply(msg, f"❌ Ошибка: {e}")
-        else: self.reply(msg, "❌ Недопустимый путь")
+        if len(parts) < 2: return False
+        created = []
+        errors = []
+        for name in parts[1:]:
+            folder_name = name.replace(' ', '_')
+            target = get_safe_path(user_dir, folder_name)
+            if target:
+                rel = os.path.relpath(target, user_dir)
+                if rel != "." and rel.count(os.sep) >= MAX_DIR_DEPTH:
+                    errors.append(f"❌ {name}: Превышена глубина вложенности")
+                else:
+                    try:
+                        os.makedirs(target, exist_ok=True)
+                        created.append(rel)
+                    except Exception as e: errors.append(f"❌ {name}: {e}")
+            else: errors.append(f"❌ {name}: Недопустимый путь")
+
+        if created:
+            self.reply(msg, f"📁 Создано директорий: {len(created)}\n" + "\n".join([f"• {c}" for c in created]))
+        if errors:
+            self.reply(msg, "\n".join(errors))
         return True
 
     def cmd_rmdir(self, msg, parts, user_dir, user_hash):
-        if len(parts) != 2: return False
+        if len(parts) < 2: return False
         items = get_all_items(user_dir)
-        resolved_paths = resolve_items_list(user_dir, parts[1], items)
+        resolved_paths = resolve_items_list(user_dir, ",".join(parts[1:]), items)
         removed_count = 0
         for target in resolved_paths:
             if target and os.path.isdir(target):
@@ -148,16 +157,16 @@ class CommandsPlugin(BasePlugin):
         return True
 
     def cmd_mv(self, msg, parts, user_dir, user_hash):
-        if len(parts) != 3: return False
+        if len(parts) < 3: return False
         items = get_all_items(user_dir)
         # Sanitize destination name if it's a new path
-        dst_arg = parts[2].replace(' ', '_')
+        dst_arg = parts[-1].replace(' ', '_')
         dst = resolve_item(user_dir, dst_arg, items)
         if not dst:
             self.reply(msg, "❌ Недопустимый путь назначения")
             return True
 
-        resolved_srcs = resolve_items_list(user_dir, parts[1], items)
+        resolved_srcs = resolve_items_list(user_dir, ",".join(parts[1:-1]), items)
         if not resolved_srcs:
             self.reply(msg, "❌ Объекты для перемещения не найдены")
             return True
@@ -220,20 +229,20 @@ class CommandsPlugin(BasePlugin):
         filter_arg = None
         if cmd == 'lss':
             mode = 'size'
-            if len(parts) > 1: filter_arg = " ".join(parts[1:])
+            if len(parts) > 1: filter_arg = ",".join(parts[1:])
         elif cmd == 'lsl':
             mode = 'long'
-            if len(parts) > 1: filter_arg = " ".join(parts[1:])
+            if len(parts) > 1: filter_arg = ",".join(parts[1:])
         else: # cmd == 'ls'
             if len(parts) > 1:
                 if parts[1] == '-s':
                     mode = 'size'
-                    if len(parts) > 2: filter_arg = " ".join(parts[2:])
+                    if len(parts) > 2: filter_arg = ",".join(parts[2:])
                 elif parts[1] == '-l':
                     mode = 'long'
-                    if len(parts) > 2: filter_arg = " ".join(parts[2:])
+                    if len(parts) > 2: filter_arg = ",".join(parts[2:])
                 else:
-                    filter_arg = " ".join(parts[1:])
+                    filter_arg = ",".join(parts[1:])
 
         items = get_all_items(user_dir)
         used = get_dir_size(user_dir)
@@ -282,7 +291,7 @@ class CommandsPlugin(BasePlugin):
         return True
 
     def cmd_link(self, msg, parts, user_dir, user_hash):
-        if len(parts) != 2: return False
+        if len(parts) < 2: return False
         items = get_all_items(user_dir)
         if not items:
             self.reply(msg, "📁 Папка пуста")
@@ -291,7 +300,7 @@ class CommandsPlugin(BasePlugin):
             res = [f"{i+1} - {self.bot.base_url}/{user_hash}/{safe_quote(itm)}" for i, itm in enumerate(items) if not itm.endswith('/')]
             self.reply(msg, "\n".join(res))
         else:
-            resolved_paths = resolve_items_list(user_dir, parts[1], items)
+            resolved_paths = resolve_items_list(user_dir, ",".join(parts[1:]), items)
             res = []
             for path in resolved_paths:
                 if not os.path.isdir(path):
@@ -303,7 +312,7 @@ class CommandsPlugin(BasePlugin):
         return True
 
     def cmd_rm(self, msg, parts, user_dir, user_hash):
-        if not (2 <= len(parts) <= 3): return False
+        if len(parts) < 2: return False
         items = get_all_items(user_dir)
         if not items:
             self.reply(msg, "📁 Папка пуста")
@@ -319,16 +328,15 @@ class CommandsPlugin(BasePlugin):
                 self.reply(msg, "🗑 Все файлы и папки удалены.")
             else: self.reply(msg, "⚠ Чтобы удалить ВСЕ файлы, напишите: rm * confirm")
         else:
-            if len(parts) == 2:
-                resolved_paths = resolve_items_list(user_dir, parts[1], items)
-                removed_count = 0
-                for path in resolved_paths:
-                    try:
-                        if os.path.isdir(path): shutil.rmtree(path)
-                        else: os.remove(path)
-                        removed_count += 1
-                    except Exception: pass
-                if removed_count: self.reply(msg, f"🗑 Удалено объектов: {removed_count}")
+            resolved_paths = resolve_items_list(user_dir, ",".join(parts[1:]), items)
+            removed_count = 0
+            for path in resolved_paths:
+                try:
+                    if os.path.isdir(path): shutil.rmtree(path)
+                    else: os.remove(path)
+                    removed_count += 1
+                except Exception: pass
+            if removed_count: self.reply(msg, f"🗑 Удалено объектов: {removed_count}")
         return True
 
     def cmd_priv(self, msg, parts, user_dir, user_hash):
@@ -371,8 +379,8 @@ class CommandsPlugin(BasePlugin):
         return True
 
     def cmd_admin_add(self, msg, parts, user_dir, user_hash):
-        if len(parts) != 2: return False
-        entries = [e.strip().lower() for e in parts[1].split(',') if e.strip()]
+        if len(parts) < 2: return False
+        entries = [e.strip().lower() for e in ",".join(parts[1:]).split(',') if e.strip()]
         added = []
         for entry in entries:
             if entry == '*' or '@' in entry or '.' in entry:
@@ -384,8 +392,8 @@ class CommandsPlugin(BasePlugin):
         return True
 
     def cmd_admin_del(self, msg, parts, user_dir, user_hash):
-        if len(parts) != 2: return False
-        entries, whitelist = [e.strip().lower() for e in parts[1].split(',') if e.strip()], self.db.get_whitelist()
+        if len(parts) < 2: return False
+        entries, whitelist = [e.strip().lower() for e in ",".join(parts[1:]).split(',') if e.strip()], self.db.get_whitelist()
         removed = [e for e in entries if e in whitelist]
         for e in removed: self.db.remove_from_whitelist(e)
         if removed: self.reply(msg, f"➖ Удалено из белого списка: {', '.join(removed)}")
@@ -393,8 +401,8 @@ class CommandsPlugin(BasePlugin):
         return True
 
     def cmd_admin_block(self, msg, parts, user_dir, user_hash):
-        if len(parts) != 2: return False
-        entries = [e.strip().lower() for e in parts[1].split(',') if e.strip()]
+        if len(parts) < 2: return False
+        entries = [e.strip().lower() for e in ",".join(parts[1:]).split(',') if e.strip()]
         added = [e for e in entries if '@' in e or '.' in e]
         for e in added: self.db.add_to_blacklist(e)
         if added: self.reply(msg, f"🚫 Добавлено в чёрный список: {', '.join(added)}")
@@ -402,8 +410,8 @@ class CommandsPlugin(BasePlugin):
         return True
 
     def cmd_admin_unblock(self, msg, parts, user_dir, user_hash):
-        if len(parts) != 2: return False
-        entries, blacklist = [e.strip().lower() for e in parts[1].split(',') if e.strip()], self.db.get_blacklist()
+        if len(parts) < 2: return False
+        entries, blacklist = [e.strip().lower() for e in ",".join(parts[1:]).split(',') if e.strip()], self.db.get_blacklist()
         removed = [e for e in entries if e in blacklist]
         for e in removed: self.db.remove_from_blacklist(e)
         if removed: self.reply(msg, f"✅ Удалено из чёрного списка: {', '.join(removed)}")
