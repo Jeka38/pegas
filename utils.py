@@ -69,9 +69,16 @@ def resolve_item(user_dir, arg, items):
     return get_safe_path(user_dir, arg)
 
 def resolve_items_list(user_dir, arg, items):
-    """Разрешение списка аргументов (индексы, пути, шаблоны)"""
+    """Разрешение списка аргументов (индексы, пути, шаблоны).
+    Аргумент 'arg' может быть строкой (через запятую) или списком строк.
+    """
     resolved = []
-    parts = [p.strip() for p in arg.split(',') if p.strip()]
+    if isinstance(arg, str):
+        parts = [p.strip() for p in arg.split(',') if p.strip()]
+    else:
+        parts = []
+        for p in arg:
+            parts.extend([i.strip() for i in p.split(',') if i.strip()])
     for p in parts:
         if '*' in p or '?' in p:
             if '/' not in p:

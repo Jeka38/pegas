@@ -3,6 +3,7 @@ import shutil
 import datetime
 import re
 import asyncio
+import logging
 from config import ADMIN_JID, QUOTA_LIMIT_BYTES, MAX_DIR_DEPTH
 from utils import (
     get_dir_size, format_size, get_safe_path, get_all_items,
@@ -146,7 +147,7 @@ class CommandsPlugin(BasePlugin):
     def cmd_rmdir(self, msg, parts, user_dir, user_hash):
         if len(parts) < 2: return False
         items = get_all_items(user_dir)
-        resolved_paths = resolve_items_list(user_dir, ",".join(parts[1:]), items)
+        resolved_paths = resolve_items_list(user_dir, parts[1:], items)
         removed_count = 0
         for target in resolved_paths:
             if target and os.path.isdir(target):
@@ -166,7 +167,7 @@ class CommandsPlugin(BasePlugin):
             self.reply(msg, "❌ Недопустимый путь назначения")
             return True
 
-        resolved_srcs = resolve_items_list(user_dir, ",".join(parts[1:-1]), items)
+        resolved_srcs = resolve_items_list(user_dir, parts[1:-1], items)
         if not resolved_srcs:
             self.reply(msg, "❌ Объекты для перемещения не найдены")
             return True
@@ -229,20 +230,20 @@ class CommandsPlugin(BasePlugin):
         filter_arg = None
         if cmd == 'lss':
             mode = 'size'
-            if len(parts) > 1: filter_arg = ",".join(parts[1:])
+            if len(parts) > 1: filter_arg = parts[1:]
         elif cmd == 'lsl':
             mode = 'long'
-            if len(parts) > 1: filter_arg = ",".join(parts[1:])
+            if len(parts) > 1: filter_arg = parts[1:]
         else: # cmd == 'ls'
             if len(parts) > 1:
                 if parts[1] == '-s':
                     mode = 'size'
-                    if len(parts) > 2: filter_arg = ",".join(parts[2:])
+                    if len(parts) > 2: filter_arg = parts[2:]
                 elif parts[1] == '-l':
                     mode = 'long'
-                    if len(parts) > 2: filter_arg = ",".join(parts[2:])
+                    if len(parts) > 2: filter_arg = parts[2:]
                 else:
-                    filter_arg = ",".join(parts[1:])
+                    filter_arg = parts[1:]
 
         items = get_all_items(user_dir)
         used = get_dir_size(user_dir)
@@ -300,7 +301,7 @@ class CommandsPlugin(BasePlugin):
             res = [f"{i+1} - {self.bot.base_url}/{user_hash}/{safe_quote(itm)}" for i, itm in enumerate(items) if not itm.endswith('/')]
             self.reply(msg, "\n".join(res))
         else:
-            resolved_paths = resolve_items_list(user_dir, ",".join(parts[1:]), items)
+            resolved_paths = resolve_items_list(user_dir, parts[1:], items)
             res = []
             for path in resolved_paths:
                 if not os.path.isdir(path):
@@ -328,7 +329,7 @@ class CommandsPlugin(BasePlugin):
                 self.reply(msg, "🗑 Все файлы и папки удалены.")
             else: self.reply(msg, "⚠ Чтобы удалить ВСЕ файлы, напишите: rm * confirm")
         else:
-            resolved_paths = resolve_items_list(user_dir, ",".join(parts[1:]), items)
+            resolved_paths = resolve_items_list(user_dir, parts[1:], items)
             removed_count = 0
             for path in resolved_paths:
                 try:
@@ -380,9 +381,16 @@ class CommandsPlugin(BasePlugin):
 
     def cmd_admin_add(self, msg, parts, user_dir, user_hash):
         if len(parts) < 2: return False
-        entries = [e.strip().lower() for e in ",".join(parts[1:]).split(',') if e.strip()]
+        entries = [e.strip().lower() for e in parts[1:] if e.strip()]
+        # If any entry contains a comma, we should still handle it for backward compatibility if needed,
+        # but the prompt asked for batch by names/numbers.
+        # Actually, split(',') was there before for "admin add jid1,jid2".
+        # Let's keep supporting it but also support space separation.
+        final_entries = []
+        for e in entries:
+            final_entries.extend([i.strip() for i in e.split(',') if i.strip()])
         added = []
-        for entry in entries:
+        for entry in final_entries:
             if entry == '*' or '@' in entry or '.' in entry:
                 self.db.add_to_whitelist(entry); added.append(entry)
         if added:
@@ -393,7 +401,11 @@ class CommandsPlugin(BasePlugin):
 
     def cmd_admin_del(self, msg, parts, user_dir, user_hash):
         if len(parts) < 2: return False
-        entries, whitelist = [e.strip().lower() for e in ",".join(parts[1:]).split(',') if e.strip()], self.db.get_whitelist()
+        raw_entries = [e.strip().lower() for e in parts[1:] if e.strip()]
+        entries = []
+        for e in raw_entries:
+            entries.extend([i.strip() for i in e.split(',') if i.strip()])
+        whitelist = self.db.get_whitelist()
         removed = [e for e in entries if e in whitelist]
         for e in removed: self.db.remove_from_whitelist(e)
         if removed: self.reply(msg, f"➖ Удалено из белого списка: {', '.join(removed)}")
@@ -402,7 +414,10 @@ class CommandsPlugin(BasePlugin):
 
     def cmd_admin_block(self, msg, parts, user_dir, user_hash):
         if len(parts) < 2: return False
-        entries = [e.strip().lower() for e in ",".join(parts[1:]).split(',') if e.strip()]
+        raw_entries = [e.strip().lower() for e in parts[1:] if e.strip()]
+        entries = []
+        for e in raw_entries:
+            entries.extend([i.strip() for i in e.split(',') if i.strip()])
         added = [e for e in entries if '@' in e or '.' in e]
         for e in added: self.db.add_to_blacklist(e)
         if added: self.reply(msg, f"🚫 Добавлено в чёрный список: {', '.join(added)}")
@@ -411,7 +426,11 @@ class CommandsPlugin(BasePlugin):
 
     def cmd_admin_unblock(self, msg, parts, user_dir, user_hash):
         if len(parts) < 2: return False
-        entries, blacklist = [e.strip().lower() for e in ",".join(parts[1:]).split(',') if e.strip()], self.db.get_blacklist()
+        raw_entries = [e.strip().lower() for e in parts[1:] if e.strip()]
+        entries = []
+        for e in raw_entries:
+            entries.extend([i.strip() for i in e.split(',') if i.strip()])
+        blacklist = self.db.get_blacklist()
         removed = [e for e in entries if e in blacklist]
         for e in removed: self.db.remove_from_blacklist(e)
         if removed: self.reply(msg, f"✅ Удалено из чёрного списка: {', '.join(removed)}")
