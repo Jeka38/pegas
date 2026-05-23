@@ -66,12 +66,32 @@ def resolve_item(user_dir, arg, items):
             return get_safe_path(user_dir, items[idx])
     except ValueError:
         pass
-    return get_safe_path(user_dir, arg)
+
+    # Try exact path match
+    path = get_safe_path(user_dir, arg)
+    if path and os.path.exists(path):
+        return path
+
+    # Try matching basename from items (for directories without full path)
+    arg_lower = arg.lower().rstrip('/')
+    for itm in items:
+        name = os.path.basename(itm.rstrip('/')).lower()
+        if name == arg_lower:
+            return get_safe_path(user_dir, itm)
+
+    return path
 
 def resolve_items_list(user_dir, arg, items):
-    """Разрешение списка аргументов (индексы, пути, шаблоны)"""
+    """Разрешение списка аргументов (индексы, пути, шаблоны).
+    Аргумент 'arg' может быть строкой (через запятую) или списком строк.
+    """
     resolved = []
-    parts = [p.strip() for p in arg.split(',') if p.strip()]
+    if isinstance(arg, str):
+        parts = [p.strip() for p in arg.split(',') if p.strip()]
+    else:
+        parts = []
+        for p in arg:
+            parts.extend([i.strip() for i in p.split(',') if i.strip()])
     for p in parts:
         if '*' in p or '?' in p:
             if '/' not in p:
